@@ -1,0 +1,100 @@
+{
+  "name": "ipv4_over_ethernet",
+  "typedefs": [
+    { "field": "macAddr_t", "bit_width": 48 },
+    { "field": "ip4Addr_t", "bit_width": 32 },
+    { "field": "etherType_t", "bit_width": 16 },
+    { "field": "port_t", "bit_width": 9 }
+  ],
+  "networks": [
+    {
+      "id": "ethernet",
+      "namespace": {
+        "member_id_type": "macAddr_t"
+      },
+      "forwarding_header": [
+        { "field": "dst_addr", "type": "macAddr_t" },
+        { "field": "src_addr", "type": "macAddr_t" },
+        { "field": "ether_type", "type": "etherType_t" }
+      ],
+      "session_protocols": [
+        {
+          "id": "eth_unicast",
+          "match_field": "dst_addr",
+          "match_type": "exact"
+        }
+      ]
+    },
+    {
+      "id": "ipv4",
+      "namespace": {
+        "member_id_type": "ip4Addr_t"
+      },
+      "forwarding_header": [
+        { "field": "version", "bit_width": 4 },
+        { "field": "ihl", "bit_width": 4 },
+        { "field": "diffserv", "bit_width": 8 },
+        { "field": "total_len", "bit_width": 16 },
+        { "field": "identification", "bit_width": 16 },
+        { "field": "flags", "bit_width": 3 },
+        { "field": "frag_offset", "bit_width": 13 },
+        { "field": "ttl", "bit_width": 8 },
+        { "field": "protocol", "bit_width": 8 },
+        { "field": "hdr_checksum", "bit_width": 16 },
+        { "field": "src_addr", "type": "ip4Addr_t" },
+        { "field": "dst_addr", "type": "ip4Addr_t" }
+      ],
+      "session_protocols": [
+        {
+          "id": "ipv4_unicast",
+          "match_field": "dst_addr",
+          "match_type": "lpm"
+        }
+      ]
+    }
+  ],
+
+  "composition": [
+    {
+      "operator": "layering",
+      "overlay": "ipv4",
+      "underlay": "ethernet",
+      "encapsulation": {
+        "indicator_field": "ethernet.ether_type",
+        "indicator_value": "0x0800"
+      },
+      "forwarding_actions": [
+        {
+          "id": "ipv4_forward",
+          "parameters": [
+            { "name": "dst_mac", "type": "macAddr_t" },
+            { "name": "src_mac", "type": "macAddr_t" },
+            { "name": "egress_port", "type": "port_t" }
+          ],
+          "primitives": [
+            {
+              "op": "set_field",
+              "target": "ethernet.dst_addr",
+              "value": { "from_param": "dst_mac" }
+            },
+            {
+              "op": "set_field",
+              "target": "ethernet.src_addr",
+              "value": { "from_param": "src_mac" }
+            },
+            { "op": "decrement", "target": "ipv4.ttl", "amount": 1 },
+            {
+              "op": "set_egress_port",
+              "value": { "from_param": "egress_port" }
+            }
+          ]
+        },
+        {
+          "id": "drop",
+          "parameters": [],
+          "primitives": [{ "op": "drop" }]
+        }
+      ]
+    }
+  ]
+}
