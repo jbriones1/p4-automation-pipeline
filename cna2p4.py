@@ -1,266 +1,415 @@
-# pyright: reportExplicitAny=false
 # pyright: reportAny=false
+# pyright: reportExplicitAny=false
 # pyright: reportUnknownArgumentType=false
-from __future__ import annotations
-
+import argparse
 import json
-from dataclasses import dataclass, field
-from enum import StrEnum
-from pathlib import Path
+import re
 from typing import Any
 
-# type MatchType = Literal["exact", "lpm", "ternary", "range"]
-networks: dict[str, Network] = {}
+
+def ident(name: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    if not s:
+        s = "x"
+    if s[0].isdigit():
+        s = "_" + s
+    return s
 
 
-class MatchTypeEnum(StrEnum):
-    exact = "exact"
-    lpm = "lpm"
-    ternary = "ternary"
-    range = "range"
+def p4_type(field: dict[str, Any], typedefs: dict[str, int]) -> str:
+    if "type" in field:
+        t = ident(field["type"])
+        if t not in typedefs:
+            raise ValueError(
+                f"Field '{field.get('field')}' references unknown typedef '{t}'"
+            )
+        return t
+    bw = field.get("bit_width")
+    if bw is None:
+        raise ValueError(f"Field '{field.get('field')}' requires 'type' or 'bit_width'")
+    return f"bit<{int(bw)}>"
 
 
-class ParseError(ValueError):
-    pass
+def as_expr_target(target: str, header_names: set[str]) -> str:
+    parts = target.split(".")
+    if len(parts) >= 2 and parts[0] in header_names:
+        return "hdr." + ".".join(parts)
+    return target
 
 
-def _require(d: dict[str, Any], key: str, where: str) -> Any:
-    if key not in d:
-        raise ParseError(f"Missing required key '{key}' in {where}")
-    return d[key]
+def as_expr_indicator(indicator_field: str, header_names: set[str]) -> str:
+    parts = indicator_field.split(".")
+    if len(parts) >= 2 and parts[0] in header_names:
+        return "hdr." + ".".join(parts)
+    return indicator_field
 
 
-def _ensure_exactly_one(d: dict[str, Any], keys: tuple[str, ...], where: str) -> str:
-    present = [k for k in keys if k in d]
-    if len(present) != 1:
-        raise ParseError(f"{where} must contain exactly one of {keys}, got {present}")
-    return present[0]
+def as_expr_value(value: Any) -> str:
+    if isinstance(value, dict) and "from_param" in value:
+        return ident(value["from_param"])
+    if isinstance(value, str):
+        return value
+    return str(value)
 
 
-@dataclass
-class Typedef:
-    field: str
-    bit_width: int
+def render_typedefs(typedefs_raw: list[dict[str, Any]]) -> tuple[str, dict[str, int]]:
+    lines: list[str] = []
+    typedefs: dict[str, int] = {}
+    for td in typedefs_raw:
+        name = ident(td["field"])
+        bw = int(td["bit_width"])
+        typedefs[name] = bw
+        lines.append(f"typedef bit<{bw}> {name};")
+    return "\n".join(lines), typedefs
 
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> "Typedef":
-        return Typedef(
-            field=str(_require(d, "field", "typedef")),
-            bit_width=int(_require(d, "bit_width", "typedef")),
+
+def collect_headers(cna: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    headers: dict[str, list[dict[str, Any]]] = {}
+
+    for n in cna.get("networks", []):
+        headers[ident(n["id"])] = n.get("forwarding_header", [])
+
+    for p in cna.get("protocols", []):
+        headers[ident(p["id"])] = p.get("headers", [])
+
+    return headers
+
+
+def render_headers(
+    headers: dict[str, list[dict[str, Any]]], typedefs: dict[str, int]
+) -> str:
+    out: list[str] = []
+    for hname, fields in headers.items():
+        out.append(f"header {hname}_t {{")
+        for f in fields:
+            fname = ident(f["field"])
+            ftype = p4_type(f, typedefs)
+            out.append(f"    {ftype} {fname};")
+        out.append("}")
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
+def render_struct_headers(headers: dict[str, list[dict[str, Any]]]) -> str:
+    out = ["struct headers_t {"]
+    for hname in headers.keys():
+        out.append(f"    {hname}_t {hname};")
+    out.append("}")
+    return "\n".join(out)
+
+
+def render_metadata_struct() -> str:
+    return "struct metadata_t {\n}"
+
+
+def build_parse_edges(
+    cna: dict[str, Any],
+) -> tuple[dict[str, list[tuple[str, str, str]]], str]:
+    edges: dict[str, list[tuple[str, str, str]]] = {}
+
+    networks = [ident(n["id"]) for n in cna.get("networks", [])]
+
+    overlays: set[str] = set()
+    for comp in cna.get("composition", []):
+        if comp.get("operator") == "layering":
+            underlay = ident(comp["underlay"])
+            overlay = ident(comp["overlay"])
+            overlays.add(overlay)
+            enc = comp.get("encapsulation", {})
+            field = enc.get("indicator_field")
+            value = enc.get("indicator_value")
+            if field and value:
+                edges.setdefault(underlay, []).append((field, value, overlay))
+
+    for net in cna.get("networks", []):
+        net_id = ident(net["id"])
+        for s in net.get("session_protocols", []):
+            proto = ident(s["protocol"])
+            field = s["indicator_field"]
+            value = s["indicator_value"]
+            edges.setdefault(net_id, []).append((field, value, proto))
+
+    roots = [n for n in networks if n not in overlays]
+    root = roots[0] if roots else (networks[0] if networks else "")
+
+    return edges, root
+
+
+def render_parser(cna: dict[str, Any], headers: dict[str, list[dict[str, Any]]]) -> str:
+    header_names = set(headers.keys())
+    edges, root = build_parse_edges(cna)
+
+    states: list[str] = []
+    states.append(
+        "parser ParserImpl(packet_in packet, out headers_t hdr, inout metadata_t meta, inout standard_metadata_t standard_metadata) {"
+    )
+    states.append("    state start {")
+    if root:
+        states.append(f"        transition parse_{root};")
+    else:
+        states.append("        transition accept;")
+    states.append("    }")
+    states.append("")
+
+    for hname in headers.keys():
+        states.append(f"    state parse_{hname} {{")
+        states.append(f"        packet.extract(hdr.{hname});")
+
+        next_edges = edges.get(hname, [])
+        if next_edges:
+            field_expr = as_expr_indicator(next_edges[0][0], header_names)
+            states.append(f"        transition select({field_expr}) {{")
+            for _, value, nxt in next_edges:
+                states.append(f"            {value}: parse_{nxt};")
+            states.append("            default: accept;")
+            states.append("        }")
+        else:
+            states.append("        transition accept;")
+
+        states.append("    }")
+        states.append("")
+
+    states.append("}")
+    return "\n".join(states).rstrip()
+
+
+def render_action(action: dict[str, Any], header_names: set[str]) -> tuple[str, str]:
+    name = ident(action["id"])
+    params = action.get("parameters", [])
+    primitives = action.get("primitives", [])
+
+    param_strs: list[str] = []
+    for p in params:
+        pname = ident(p["name"])
+        if "type" in p:
+            ptype = ident(p["type"])
+        else:
+            ptype = f"bit<{int(p['bit_width'])}>"
+        param_strs.append(f"{ptype} {pname}")
+
+    out = [f"action {name}({', '.join(param_strs)}) {{"]
+
+    if not primitives:
+        out.append("    // no primitives")
+    else:
+        for prim in primitives:
+            op = prim.get("op")
+            if op == "set_field":
+                target = as_expr_target(prim["target"], header_names)
+                value = as_expr_value(prim["value"])
+                out.append(f"    {target} = {value};")
+            elif op == "decrement":
+                target = as_expr_target(prim["target"], header_names)
+                amount = prim.get("amount", 1)
+                out.append(f"    {target} = {target} - {amount};")
+            elif op == "set_egress_port":
+                value = as_expr_value(prim["value"])
+                out.append(f"    standard_metadata.egress_spec = {value};")
+            elif op == "drop":
+                out.append("    mark_to_drop(standard_metadata);")
+            elif op == "noop":
+                out.append("    ;")
+            else:
+                out.append(f"    // unsupported primitive: {op}")
+
+    out.append("}")
+    return name, "\n".join(out)
+
+
+def pick_default_action(action_names: list[tuple[str, dict[str, Any]]]) -> str:
+    for name, action in action_names:
+        if not action.get("parameters"):
+            return f"{name}()"
+    return "NoAction()"
+
+
+def render_ingress(
+    cna: dict[str, Any], headers: dict[str, list[dict[str, Any]]]
+) -> str:
+    header_names = set(headers.keys())
+
+    action_defs: list[str] = []
+    table_defs: list[str] = []
+    apply_lines: list[str] = []
+
+    groups: list[tuple[str, list[dict[str, Any]]]] = []
+
+    for comp in cna.get("composition", []):
+        gname = ident(f"fwd_{comp.get('overlay', 'net')}")
+        groups.append((gname, comp.get("forwarding_actions", [])))
+
+    for mb in cna.get("middleboxes", []):
+        gname = ident(f"{mb['id']}_policy")
+        groups.append((gname, mb.get("actions", [])))
+
+    used_names: set[str] = set()
+
+    for gname, actions in groups:
+        if not actions:
+            continue
+
+        rendered_actions: list[tuple[str, dict[str, Any]]] = []
+        for a in actions:
+            base_name = ident(a["id"])
+            name = base_name
+            i = 1
+            while name in used_names:
+                i += 1
+                name = f"{base_name}_{i}"
+            used_names.add(name)
+
+            action_copy = dict(a)
+            action_copy["id"] = name
+            action_name, action_code = render_action(action_copy, header_names)
+            action_defs.append(action_code)
+            rendered_actions.append((action_name, action_copy))
+
+        tbl = ident(f"{gname}_tbl")
+        table_defs.append(f"table {tbl} {{")
+        table_defs.append("    key = {")
+        table_defs.append("    }")
+        table_defs.append("    actions = {")
+        for an, _ in rendered_actions:
+            table_defs.append(f"        {an};")
+        table_defs.append("        NoAction;")
+        table_defs.append("    }")
+        table_defs.append("    size = 1024;")
+        table_defs.append(
+            f"    default_action = {pick_default_action(rendered_actions)};"
         )
+        table_defs.append("}")
+        table_defs.append("")
+        apply_lines.append(f"        {tbl}.apply();")
 
+    out = [
+        "control IngressImpl(inout headers_t hdr, inout metadata_t meta, inout standard_metadata_t standard_metadata) {",
+        "",
+    ]
 
-@dataclass
-class Namespace:
-    member_id_type: str
+    if action_defs:
+        for block in action_defs:
+            out.extend(f"    {line}" if line else "" for line in block.splitlines())
+            out.append("")
 
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> "Namespace":
-        return Namespace(member_id_type=str(_require(d, "member_id_type", "namespace")))
-
-
-@dataclass
-class HeaderField:
-    field: str
-    type: str | None = None
-    bit_width: int | None = None
-
-    @staticmethod
-    def from_dict(d: dict[str, Any], where: str) -> "HeaderField":
-        which = _ensure_exactly_one(d, ("type", "bit_width"), where)
-        return HeaderField(
-            field=str(_require(d, "field", where)),
-            type=str(d["type"]) if which == "type" else None,
-            bit_width=int(d["bit_width"]) if which == "bit_width" else None,
+    if table_defs:
+        out.extend(
+            f"    {line}" if line else ""
+            for line in "\n".join(table_defs).rstrip().splitlines()
         )
+        out.append("")
+
+    out.append("    apply {")
+    if apply_lines:
+        out.extend(apply_lines)
+    out.append("    }")
+    out.append("}")
+    return "\n".join(out).rstrip()
 
 
-@dataclass
-class SessionProtocol:
-    id: str
-    match_field: str
-    match_type: MatchTypeEnum
-
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> SessionProtocol:
-        match_t = str(_require(d, "match_type", "session_protocol"))
-        if match_t not in MatchTypeEnum:
-            raise ParseError(f"Invalid match_type '{match_t}'")
-        mt = MatchTypeEnum(match_t)
-        return SessionProtocol(
-            id=str(_require(d, "id", "session_protocol")),
-            match_field=str(_require(d, "match_field", "session_protocol")),
-            match_type=mt,
-        )
+def render_egress() -> str:
+    return """control EgressImpl(inout headers_t hdr, inout metadata_t meta, inout standard_metadata_t standard_metadata) {
+    apply {
+    }
+}"""
 
 
-@dataclass
-class Network:
-    id: str
-    namespace: Namespace
-    forwarding_header: list[HeaderField]
-    session_protocols: list[SessionProtocol]
-
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> Network:
-        net = Network(
-            id=str(_require(d, "id", "network")),
-            namespace=Namespace.from_dict(_require(d, "namespace", "network")),
-            forwarding_header=[
-                HeaderField.from_dict(
-                    x, f"network[{d.get('id', '?')}].forwarding_header"
-                )
-                for x in _require(d, "forwarding_header", "network")
-            ],
-            session_protocols=[
-                SessionProtocol.from_dict(x)
-                for x in _require(d, "session_protocols", "network")
-            ],
-        )
-        if net.id in networks:
-            raise ParseError(f"Duplicate network id '{net.id}'")
-        networks[net.id] = net
-        return net
+def render_verify_checksum() -> str:
+    return """control VerifyChecksumImpl(inout headers_t hdr, inout metadata_t meta) {
+    apply {
+    }
+}"""
 
 
-@dataclass
-class ValueRef:
-    from_param: str | None = None
-
-    @staticmethod
-    def from_obj(obj: Any, where: str) -> ValueRef:
-        if not isinstance(obj, dict):
-            raise ParseError(f"{where}.value must be an object")
-        # Extend here if you later support constants, expressions, etc.
-        if "from_param" in obj:
-            return ValueRef(from_param=str(obj["from_param"]))
-        raise ParseError(f"{where}.value: unsupported value object {obj}")
+def render_compute_checksum() -> str:
+    return """control ComputeChecksumImpl(inout headers_t hdr, inout metadata_t meta) {
+    apply {
+    }
+}"""
 
 
-@dataclass
-class Primitive:
-    op: str
-    target: str | None = None
-    amount: int | None = None
-    value: ValueRef | None = None
-
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> "Primitive":
-        op = str(_require(d, "op", "primitive"))
-        p = Primitive(op=op)
-        if "target" in d:
-            p.target = str(d["target"])
-        if "amount" in d:
-            p.amount = int(d["amount"])
-        if "value" in d:
-            p.value = ValueRef.from_obj(d["value"], f"primitive[{op}]")
-        return p
+def render_deparser(headers: dict[str, list[dict[str, Any]]]) -> str:
+    out = ["control DeparserImpl(packet_out packet, in headers_t hdr) {", "    apply {"]
+    for hname in headers.keys():
+        out.append(f"        packet.emit(hdr.{hname});")
+    out.append("    }")
+    out.append("}")
+    return "\n".join(out)
 
 
-@dataclass
-class ActionParam:
-    name: str
-    type: str
+def generate_p4(cna: dict[str, Any]) -> str:
+    typedefs_txt, typedefs = render_typedefs(cna.get("typedefs", []))
+    headers = collect_headers(cna)
 
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> "ActionParam":
-        return ActionParam(
-            name=str(_require(d, "name", "action parameter")),
-            type=str(_require(d, "type", "action parameter")),
-        )
+    parts = [
+        "#include <core.p4>",
+        "#include <v1model.p4>",
+        "",
+        "const bit<16> TYPE_IPV4 = 0x0800;",
+        "",
+        typedefs_txt,
+        "",
+        render_headers(headers, typedefs),
+        "",
+        render_struct_headers(headers),
+        "",
+        render_metadata_struct(),
+        "",
+        render_parser(cna, headers),
+        "",
+        render_verify_checksum(),
+        "",
+        render_ingress(cna, headers),
+        "",
+        render_egress(),
+        "",
+        render_compute_checksum(),
+        "",
+        render_deparser(headers),
+        "",
+        "V1Switch(",
+        "    ParserImpl(),",
+        "    VerifyChecksumImpl(),",
+        "    IngressImpl(),",
+        "    EgressImpl(),",
+        "    ComputeChecksumImpl(),",
+        "    DeparserImpl()",
+        ") main;",
+    ]
 
-
-@dataclass
-class ForwardingAction:
-    id: str
-    parameters: list[ActionParam]
-    primitives: list[Primitive]
-
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> "ForwardingAction":
-        return ForwardingAction(
-            id=str(_require(d, "id", "forwarding action")),
-            parameters=[
-                ActionParam.from_dict(x)
-                for x in _require(d, "parameters", "forwarding action")
-            ],
-            primitives=[
-                Primitive.from_dict(x)
-                for x in _require(d, "primitives", "forwarding action")
-            ],
-        )
-
-
-@dataclass
-class OverlayIdentifier:
-    field_name: str
-    field_value: str
-
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> "OverlayIdentifier":
-        return OverlayIdentifier(
-            field_name=str(_require(d, "field_name", "encapsulation")),
-            field_value=str(_require(d, "field_value", "encapsulation")),
-        )
+    return "\n".join(parts).rstrip() + "\n"
 
 
-@dataclass
-class Composition:
-    operator: str
-    overlay: str
-    underlay: str
-    encapsulation: OverlayIdentifier
-    forwarding_actions: list[ForwardingAction]
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate P4_16 from CNA JSON specification"
+    )
+    _ = parser.add_argument("input", help="Path to CNA JSON file")
+    _ = parser.add_argument(
+        "-o",
+        "--output",
+        help="Output P4 file (default: <name>.p4 from CNA root 'name')",
+    )
+    args = parser.parse_args()
 
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> "Composition":
-        return Composition(
-            operator=str(_require(d, "operator", "composition")),
-            overlay=str(_require(d, "overlay", "composition")),
-            underlay=str(_require(d, "underlay", "composition")),
-            encapsulation=OverlayIdentifier.from_dict(
-                _require(d, "encapsulation", "composition")
-            ),
-            forwarding_actions=[
-                ForwardingAction.from_dict(x)
-                for x in _require(d, "forwarding_actions", "composition")
-            ],
-        )
+    with open(args.input, "r", encoding="utf-8") as f:
+        cna = json.load(f)
 
+    output_path = args.output
+    if not output_path:
+        cna_name = cna.get("name")
+        if not isinstance(cna_name, str) or not cna_name.strip():
+            raise ValueError(
+                "CNA root object must contain a non-empty 'name' when --output is not provided"
+            )
+        output_path = f"{ident(cna_name)}.p4"
 
-@dataclass
-class PipelineSpec:
-    name: str
-    typedefs: list[Typedef] = field(default_factory=list)
-    networks: list[Network] = field(default_factory=list)
-    composition: list[Composition] = field(default_factory=list)
+    p4_code = generate_p4(cna)
 
-    @staticmethod
-    def from_dict(d: dict[str, Any]) -> "PipelineSpec":
-        return PipelineSpec(
-            name=str(_require(d, "name", "root")),
-            typedefs=[Typedef.from_dict(x) for x in _require(d, "typedefs", "root")],
-            networks=[Network.from_dict(x) for x in _require(d, "networks", "root")],
-            composition=[
-                Composition.from_dict(x) for x in _require(d, "composition", "root")
-            ],
-        )
+    with open(output_path, "w", encoding="utf-8") as f:
+        _ = f.write(p4_code)
 
-    @staticmethod
-    def from_file(path: str | Path) -> PipelineSpec:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            raise ParseError("Root JSON value must be an object")
-        return PipelineSpec.from_dict(data)
+    print(f"Generated {output_path} from {args.input}")
 
 
 if __name__ == "__main__":
-    # Example:
-    #   python3 parser.py /path/to/spec.json
-    import sys
-
-    if len(sys.argv) != 2:
-        raise SystemExit("Usage: python3 cna2p4.py <spec.json>")
-    spec = PipelineSpec.from_file(sys.argv[1])
-    print(spec)
+    main()

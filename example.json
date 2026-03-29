@@ -1,10 +1,38 @@
 {
-  "name": "ipv4_over_ethernet",
+  "cna_version": "0.4",
+  "name": "ethernet_ipv4_tcp_udp",
   "typedefs": [
     { "field": "macAddr_t", "bit_width": 48 },
     { "field": "ip4Addr_t", "bit_width": 32 },
     { "field": "etherType_t", "bit_width": 16 },
-    { "field": "port_t", "bit_width": 9 }
+    { "field": "port_t", "bit_width": 9 },
+    { "field": "l4Port_t", "bit_width": 16 }
+  ],
+  "protocols": [
+    {
+      "id": "tcp",
+      "headers": [
+        { "field": "src_port", "type": "l4Port_t" },
+        { "field": "dst_port", "type": "l4Port_t" },
+        { "field": "seq_no", "bit_width": 32 },
+        { "field": "ack_no", "bit_width": 32 },
+        { "field": "data_off", "bit_width": 4 },
+        { "field": "res", "bit_width": 4 },
+        { "field": "flags", "bit_width": 8 },
+        { "field": "window", "bit_width": 16 },
+        { "field": "checksum", "bit_width": 16 },
+        { "field": "urg_ptr", "bit_width": 16 }
+      ]
+    },
+    {
+      "id": "udp",
+      "headers": [
+        { "field": "src_port", "type": "l4Port_t" },
+        { "field": "dst_port", "type": "l4Port_t" },
+        { "field": "length", "bit_width": 16 },
+        { "field": "checksum", "bit_width": 16 }
+      ]
+    }
   ],
   "networks": [
     {
@@ -17,13 +45,7 @@
         { "field": "src_addr", "type": "macAddr_t" },
         { "field": "ether_type", "type": "etherType_t" }
       ],
-      "session_protocols": [
-        {
-          "id": "eth_unicast",
-          "match_field": "dst_addr",
-          "match_type": "exact"
-        }
-      ]
+      "session_protocols": []
     },
     {
       "id": "ipv4",
@@ -46,14 +68,18 @@
       ],
       "session_protocols": [
         {
-          "id": "ipv4_unicast",
-          "match_field": "dst_addr",
-          "match_type": "lpm"
+          "protocol": "tcp",
+          "indicator_field": "ipv4.protocol",
+          "indicator_value": "0x06"
+        },
+        {
+          "protocol": "udp",
+          "indicator_field": "ipv4.protocol",
+          "indicator_value": "0x11"
         }
       ]
     }
   ],
-
   "composition": [
     {
       "operator": "layering",
@@ -93,6 +119,53 @@
           "id": "drop",
           "parameters": [],
           "primitives": [{ "op": "drop" }]
+        }
+      ]
+    }
+  ],
+  "middleboxes": [
+    {
+      "id": "nat",
+      "network": "ipv4",
+      "inspects": ["ethernet", "ipv4", "tcp", "udp"],
+      "actions": [
+        {
+          "id": "nat_rewrite_src",
+          "parameters": [
+            { "name": "new_src_addr", "type": "ip4Addr_t" },
+            { "name": "new_src_port", "type": "l4Port_t" }
+          ],
+          "primitives": [
+            {
+              "op": "set_field",
+              "target": "ipv4.src_addr",
+              "value": { "from_param": "new_src_addr" }
+            },
+            {
+              "op": "set_field",
+              "target": "tcp.src_port",
+              "value": { "from_param": "new_src_port" }
+            }
+          ]
+        },
+        {
+          "id": "nat_rewrite_dst",
+          "parameters": [
+            { "name": "orig_dst_addr", "type": "ip4Addr_t" },
+            { "name": "orig_dst_port", "type": "l4Port_t" }
+          ],
+          "primitives": [
+            {
+              "op": "set_field",
+              "target": "ipv4.dst_addr",
+              "value": { "from_param": "orig_dst_addr" }
+            },
+            {
+              "op": "set_field",
+              "target": "tcp.dst_port",
+              "value": { "from_param": "orig_dst_port" }
+            }
+          ]
         }
       ]
     }
