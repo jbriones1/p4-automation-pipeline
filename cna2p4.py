@@ -395,24 +395,6 @@ def render_egress() -> str:
     )
 
 
-def render_verify_checksum() -> str:
-    return (
-        "control VerifyChecksumImpl(inout headers_t hdr, inout metadata_t meta) {\n"
-        "    apply {\n"
-        "    }\n"
-        "}"
-    )
-
-
-def render_compute_checksum() -> str:
-    return (
-        "control ComputeChecksumImpl(inout headers_t hdr, inout metadata_t meta) {\n"
-        "    apply {\n"
-        "    }\n"
-        "}"
-    )
-
-
 def render_deparser(headers: dict[str, list[dict[str, Any]]]) -> str:
     out = ["control DeparserImpl(packet_out packet, in headers_t hdr) {", "    apply {"]
     for hname in headers.keys():
@@ -446,22 +428,16 @@ def generate_p4(cna: dict[str, Any]) -> str:
         "",
         render_parser(cna, headers),
         "",
-        render_verify_checksum(),
-        "",
         render_ingress(cna, headers),
         "",
         render_egress(),
-        "",
-        render_compute_checksum(),
         "",
         render_deparser(headers),
         "",
         "V1Switch(",
         "    ParserImpl(),",
-        "    VerifyChecksumImpl(),",
         "    IngressImpl(),",
         "    EgressImpl(),",
-        "    ComputeChecksumImpl(),",
         "    DeparserImpl()",
         ") main;",
     ]
