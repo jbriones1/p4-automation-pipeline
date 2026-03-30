@@ -1,7 +1,7 @@
 from enum import StrEnum
 
 
-class ForwardAction(StrEnum):
+class Action(StrEnum):
     Noop = "noop"
     SetField = "set_field"
     Decrement = "decrement"
