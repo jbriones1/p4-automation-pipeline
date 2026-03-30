@@ -75,6 +75,21 @@ def collect_headers(cna: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return headers
 
 
+def render_consts(consts_raw: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for const in consts_raw:
+        name = ident(const["field"])
+        bw = const.get("bit_width")
+        value = const.get("value")
+        if bw is None or value is None:
+            raise ValueError(
+                f"Const '{const.get('field')}' requires 'bit_width' and 'value'"
+            )
+        value_expr = value if isinstance(value, str) else str(value)
+        lines.append(f"const bit<{int(bw)}> {name} = {value_expr};")
+    return "\n".join(lines)
+
+
 def render_headers(
     headers: dict[str, list[dict[str, Any]]], typedefs: dict[str, int]
 ) -> str:
@@ -176,7 +191,7 @@ def render_parser(cna: dict[str, Any], headers: dict[str, list[dict[str, Any]]])
 def render_action(action: dict[str, Any], header_names: set[str]) -> tuple[str, str]:
     name = ident(action["id"])
     params = action.get("parameters", [])
-    primitives = action.get("primitives", [])
+    operations = action.get("operations", [])
 
     param_strs: list[str] = []
     for p in params:
@@ -189,10 +204,10 @@ def render_action(action: dict[str, Any], header_names: set[str]) -> tuple[str, 
 
     out = [f"action {name}({', '.join(param_strs)}) {{"]
 
-    if not primitives:
-        out.append("    // no primitives")
+    if not operations:
+        out.append("    // no operations")
     else:
-        for prim in primitives:
+        for prim in operations:
             op = prim.get("op")
             if op == "set_field":
                 target = as_expr_target(prim["target"], header_names)
@@ -210,7 +225,7 @@ def render_action(action: dict[str, Any], header_names: set[str]) -> tuple[str, 
             elif op == "noop":
                 out.append("    ;")
             else:
-                out.append(f"    // unsupported primitive: {op}")
+                out.append(f"    // unsupported operation: {op}")
 
     out.append("}")
     return name, "\n".join(out)
@@ -238,7 +253,7 @@ def render_ingress(
         gname = ident(f"fwd_{comp.get('overlay', 'net')}")
         groups.append((gname, comp.get("forwarding_actions", [])))
 
-    for mb in cna.get("middleboxes", []):
+    for mb in cna.get("services", []):
         gname = ident(f"{mb['id']}_policy")
         groups.append((gname, mb.get("actions", [])))
 
@@ -337,6 +352,7 @@ def render_deparser(headers: dict[str, list[dict[str, Any]]]) -> str:
 
 
 def generate_p4(cna: dict[str, Any]) -> str:
+    consts_txt = render_consts(cna.get("consts", []))
     typedefs_txt, typedefs = render_typedefs(cna.get("typedefs", []))
     headers = collect_headers(cna)
 
@@ -344,7 +360,7 @@ def generate_p4(cna: dict[str, Any]) -> str:
         "#include <core.p4>",
         "#include <v1model.p4>",
         "",
-        "const bit<16> TYPE_IPV4 = 0x0800;",
+        consts_txt,
         "",
         typedefs_txt,
         "",

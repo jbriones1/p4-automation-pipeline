@@ -1,6 +1,11 @@
 {
   "cna_version": "0.4",
   "name": "ethernet_ipv4_tcp_udp",
+  "consts": [
+    { "field": "IPV4_ETHTYPE", "bit_width": "16", "value": "0x800"},
+    { "field": "UDP_PROTO", "bit_width": "16", "value": 17},
+    { "field": "TCP_PROTO", "bit_width": "16", "value": 6}
+  ],
   "typedefs": [
     { "field": "macAddr_t", "bit_width": 48 },
     { "field": "ip4Addr_t", "bit_width": 32 },
@@ -70,12 +75,44 @@
         {
           "protocol": "tcp",
           "indicator_field": "ipv4.protocol",
-          "indicator_value": "0x06"
+          "indicator_value": "TCP_PROTO"
         },
         {
           "protocol": "udp",
           "indicator_field": "ipv4.protocol",
-          "indicator_value": "0x11"
+          "indicator_value": "UDP_PROTO"
+        }
+      ]
+    },
+    {
+      "id": "ipv4_2",
+      "namespace": {
+        "member_id_type": "ip4Addr_t"
+      },
+      "forwarding_header": [
+        { "field": "version", "bit_width": 4 },
+        { "field": "ihl", "bit_width": 4 },
+        { "field": "diffserv", "bit_width": 8 },
+        { "field": "total_len", "bit_width": 16 },
+        { "field": "identification", "bit_width": 16 },
+        { "field": "flags", "bit_width": 3 },
+        { "field": "frag_offset", "bit_width": 13 },
+        { "field": "ttl", "bit_width": 8 },
+        { "field": "protocol", "bit_width": 8 },
+        { "field": "hdr_checksum", "bit_width": 16 },
+        { "field": "src_addr", "type": "ip4Addr_t" },
+        { "field": "dst_addr", "type": "ip4Addr_t" }
+      ],
+      "session_protocols": [
+        {
+          "protocol": "tcp",
+          "indicator_field": "ipv4.protocol",
+          "indicator_value": "TCP_PROTO"
+        },
+        {
+          "protocol": "udp",
+          "indicator_field": "ipv4.protocol",
+          "indicator_value": "UDP_PROTO"
         }
       ]
     }
@@ -83,11 +120,11 @@
   "composition": [
     {
       "operator": "layering",
-      "overlay": "ipv4",
+      "overlay": "ipv4_2",
       "underlay": "ethernet",
       "encapsulation": {
         "indicator_field": "ethernet.ether_type",
-        "indicator_value": "0x0800"
+        "indicator_value": "IPV4_ETHTYPE"
       },
       "forwarding_actions": [
         {
@@ -97,7 +134,7 @@
             { "name": "src_mac", "type": "macAddr_t" },
             { "name": "egress_port", "type": "port_t" }
           ],
-          "primitives": [
+          "operations": [
             {
               "op": "set_field",
               "target": "ethernet.dst_addr",
@@ -118,16 +155,15 @@
         {
           "id": "drop",
           "parameters": [],
-          "primitives": [{ "op": "drop" }]
+          "operations": [{ "op": "drop" }]
         }
       ]
     }
   ],
-  "middleboxes": [
+  "services": [
     {
       "id": "nat",
-      "network": "ipv4",
-      "inspects": ["ethernet", "ipv4", "tcp", "udp"],
+      "network": "ipv4_2",
       "actions": [
         {
           "id": "nat_rewrite_src",
@@ -135,7 +171,7 @@
             { "name": "new_src_addr", "type": "ip4Addr_t" },
             { "name": "new_src_port", "type": "l4Port_t" }
           ],
-          "primitives": [
+          "operations": [
             {
               "op": "set_field",
               "target": "ipv4.src_addr",
@@ -154,7 +190,7 @@
             { "name": "orig_dst_addr", "type": "ip4Addr_t" },
             { "name": "orig_dst_port", "type": "l4Port_t" }
           ],
-          "primitives": [
+          "operations": [
             {
               "op": "set_field",
               "target": "ipv4.dst_addr",
