@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from consts import ForwardAction
+
 
 def ident(name: str) -> str:
     s = re.sub(r"[^a-zA-Z0-9_]", "_", name)
@@ -14,6 +16,11 @@ def ident(name: str) -> str:
     if s[0].isdigit():
         s = "_" + s
     return s
+
+
+def indent_line(line: str, level: int = 1) -> str:
+    indent = " " * 4 * level
+    return f"{indent}{line}"
 
 
 def p4_type(field: dict[str, Any], typedefs: dict[str, int]) -> str:
@@ -63,14 +70,40 @@ def render_typedefs(typedefs_raw: list[dict[str, Any]]) -> tuple[str, dict[str, 
     return "\n".join(lines), typedefs
 
 
+def collect_proto_defs(cna: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Build a lookup from protocol id to its full definition."""
+    return {ident(p["id"]): p for p in cna.get("protocols", [])}
+
+
 def collect_headers(cna: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """
+    Return a mapping from P4 header name -> list of field dicts.
+
+    - Forwarding protocols (role: "forwarding") are instantiated once per
+      network instance: the instance id becomes the header name and the
+      field definitions come from the protocol type referenced by "type".
+    - Session protocols (role: "session") keep their own protocol id as the
+      header name, since they are shared across all network instances that
+      embed them.
+    """
+    proto_defs = collect_proto_defs(cna)
     headers: dict[str, list[dict[str, Any]]] = {}
 
+    # Network instances → headers resolved through their protocol type
     for n in cna.get("networks", []):
-        headers[ident(n["id"])] = n.get("forwarding_header", [])
+        instance_id = ident(n["id"])
+        proto_type = ident(n["type"])
+        proto = proto_defs.get(proto_type)
+        if proto is None:
+            raise ValueError(
+                f"Network '{n['id']}' references unknown protocol type '{n['type']}'"
+            )
+        headers[instance_id] = proto.get("headers", [])
 
+    # Session protocols get their own header entry keyed by protocol id
     for p in cna.get("protocols", []):
-        headers[ident(p["id"])] = p.get("headers", [])
+        if p.get("role") == "session":
+            headers[ident(p["id"])] = p.get("headers", [])
 
     return headers
 
@@ -120,22 +153,39 @@ def render_metadata_struct() -> str:
 def build_parse_edges(
     cna: dict[str, Any],
 ) -> tuple[dict[str, list[tuple[str, str, str]]], str]:
+    """
+    Build a graph of parser transitions.
+
+    Each edge is (indicator_field, indicator_value, next_state) and is keyed
+    by the header whose select expression triggers the transition.
+
+    Layering composition contributes edges from the underlay header to the
+    overlay header (e.g. eth1.ether_type -> ip1).  Session protocol entries on
+    each network instance contribute edges from that instance's header to the
+    session protocol header (e.g. ip1.protocol -> tcp).
+
+    The parser root is the lowest-level network instance — whichever instance
+    is not itself an overlay in any layering composition.
+    """
     edges: dict[str, list[tuple[str, str, str]]] = {}
 
+    # All network instance ids, in declaration order
     networks = [ident(n["id"]) for n in cna.get("networks", [])]
 
+    # Layering composition: underlay -> overlay transition
     overlays: set[str] = set()
     for comp in cna.get("composition", []):
         if comp.get("operator") == "layering":
             underlay = ident(comp["underlay"])
             overlay = ident(comp["overlay"])
             overlays.add(overlay)
-            enc = comp.get("encapsulation", {})
-            field = enc.get("indicator_field")
-            value = enc.get("indicator_value")
+            enc = comp.get("session_identifier", {})
+            field = enc.get("field")
+            value = enc.get("value")
             if field and value:
                 edges.setdefault(underlay, []).append((field, value, overlay))
 
+    # Session protocols embedded in each network instance
     for net in cna.get("networks", []):
         net_id = ident(net["id"])
         for s in net.get("session_protocols", []):
@@ -144,6 +194,7 @@ def build_parse_edges(
             value = s["indicator_value"]
             edges.setdefault(net_id, []).append((field, value, proto))
 
+    # The root is the first network instance that is not an overlay
     roots = [n for n in networks if n not in overlays]
     root = roots[0] if roots else (networks[0] if networks else "")
 
@@ -156,7 +207,11 @@ def render_parser(cna: dict[str, Any], headers: dict[str, list[dict[str, Any]]])
 
     states: list[str] = []
     states.append(
-        "parser ParserImpl(packet_in packet, out headers_t hdr, inout metadata_t meta, inout standard_metadata_t standard_metadata) {"
+        "parser ParserImpl("
+        + "packet_in packet, "
+        + "out headers_t hdr, "
+        + "inout metadata_t meta, "
+        + "inout standard_metadata_t standard_metadata) {"
     )
     states.append("    state start {")
     if root:
@@ -172,6 +227,7 @@ def render_parser(cna: dict[str, Any], headers: dict[str, list[dict[str, Any]]])
 
         next_edges = edges.get(hname, [])
         if next_edges:
+            # All edges for one header share the same indicator field
             field_expr = as_expr_indicator(next_edges[0][0], header_names)
             states.append(f"        transition select({field_expr}) {{")
             for _, value, nxt in next_edges:
@@ -207,22 +263,22 @@ def render_action(action: dict[str, Any], header_names: set[str]) -> tuple[str, 
     if not operations:
         out.append("    // no operations")
     else:
-        for prim in operations:
-            op = prim.get("op")
-            if op == "set_field":
-                target = as_expr_target(prim["target"], header_names)
-                value = as_expr_value(prim["value"])
+        for operation in operations:
+            op = operation.get("op")
+            if op == ForwardAction.SetField:
+                target = as_expr_target(operation["target"], header_names)
+                value = as_expr_value(operation["value"])
                 out.append(f"    {target} = {value};")
-            elif op == "decrement":
-                target = as_expr_target(prim["target"], header_names)
-                amount = prim.get("amount", 1)
+            elif op == ForwardAction.Decrement:
+                target = as_expr_target(operation["target"], header_names)
+                amount = operation.get("amount", 1)
                 out.append(f"    {target} = {target} - {amount};")
-            elif op == "set_egress_port":
-                value = as_expr_value(prim["value"])
+            elif op == ForwardAction.SetEgressPort:
+                value = as_expr_value(operation["value"])
                 out.append(f"    standard_metadata.egress_spec = {value};")
-            elif op == "drop":
+            elif op == ForwardAction.Drop:
                 out.append("    mark_to_drop(standard_metadata);")
-            elif op == "noop":
+            elif op == ForwardAction.Noop:
                 out.append("    ;")
             else:
                 out.append(f"    // unsupported operation: {op}")
@@ -247,15 +303,17 @@ def render_ingress(
     table_defs: list[str] = []
     apply_lines: list[str] = []
 
+    # One table per layering composition (forwarding actions)
+    # and one table per service (policy/middlebox actions)
     groups: list[tuple[str, list[dict[str, Any]]]] = []
 
     for comp in cna.get("composition", []):
         gname = ident(f"fwd_{comp.get('overlay', 'net')}")
         groups.append((gname, comp.get("forwarding_actions", [])))
 
-    for mb in cna.get("services", []):
-        gname = ident(f"{mb['id']}_policy")
-        groups.append((gname, mb.get("actions", [])))
+    for svc in cna.get("services", []):
+        gname = ident(f"{svc['id']}_policy")
+        groups.append((gname, svc.get("actions", [])))
 
     used_names: set[str] = set()
 
@@ -265,6 +323,7 @@ def render_ingress(
 
         rendered_actions: list[tuple[str, dict[str, Any]]] = []
         for a in actions:
+            # Deduplicate action names across groups
             base_name = ident(a["id"])
             name = base_name
             i = 1
@@ -297,7 +356,10 @@ def render_ingress(
         apply_lines.append(f"        {tbl}.apply();")
 
     out = [
-        "control IngressImpl(inout headers_t hdr, inout metadata_t meta, inout standard_metadata_t standard_metadata) {",
+        "control IngressImpl("
+        + "inout headers_t hdr, "
+        + "inout metadata_t meta, "
+        + "inout standard_metadata_t standard_metadata) {",
         "",
     ]
 
@@ -322,31 +384,43 @@ def render_ingress(
 
 
 def render_egress() -> str:
-    return """control EgressImpl(inout headers_t hdr, inout metadata_t meta, inout standard_metadata_t standard_metadata) {
-    apply {
-    }
-}"""
+    return (
+        "control EgressImpl("
+        "inout headers_t hdr, "
+        "inout metadata_t meta, "
+        "inout standard_metadata_t standard_metadata) {\n"
+        "    apply {\n"
+        "    }\n"
+        "}"
+    )
 
 
 def render_verify_checksum() -> str:
-    return """control VerifyChecksumImpl(inout headers_t hdr, inout metadata_t meta) {
-    apply {
-    }
-}"""
+    return (
+        "control VerifyChecksumImpl(inout headers_t hdr, inout metadata_t meta) {\n"
+        "    apply {\n"
+        "    }\n"
+        "}"
+    )
 
 
 def render_compute_checksum() -> str:
-    return """control ComputeChecksumImpl(inout headers_t hdr, inout metadata_t meta) {
-    apply {
-    }
-}"""
+    return (
+        "control ComputeChecksumImpl(inout headers_t hdr, inout metadata_t meta) {\n"
+        "    apply {\n"
+        "    }\n"
+        "}"
+    )
 
 
 def render_deparser(headers: dict[str, list[dict[str, Any]]]) -> str:
     out = ["control DeparserImpl(packet_out packet, in headers_t hdr) {", "    apply {"]
     for hname in headers.keys():
-        out.append(f"        packet.emit(hdr.{hname});")
-    out.append("    }")
+        header = f"hdr.{hname}"
+        out.append(indent_line(f"if ({header}.isValid()) {{", 2))
+        out.append(indent_line(f"packet.emit({header});", 3))
+        out.append(indent_line("}", 2))
+    out.append(indent_line("}", 1))
     out.append("}")
     return "\n".join(out)
 
@@ -403,7 +477,7 @@ def main() -> None:
     _ = parser.add_argument(
         "-o",
         "--output",
-        help="Output P4 file (default: <name>.p4 from CNA root 'name')",
+        help="Output P4 file (default: <name>.p4 derived from CNA root 'name')",
     )
     args = parser.parse_args()
 
@@ -415,7 +489,8 @@ def main() -> None:
         cna_name = cna.get("name")
         if not isinstance(cna_name, str) or not cna_name.strip():
             raise ValueError(
-                "CNA root object must contain a non-empty 'name' when --output is not provided"
+                "CNA root object must contain a non-empty 'name' "
+                + "when --output is not provided"
             )
         output_path = f"{ident(cna_name)}.p4"
 
