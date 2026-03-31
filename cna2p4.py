@@ -6,7 +6,11 @@ import json
 import re
 from typing import Any
 
-from consts import ForwardAction
+from consts import Action
+
+
+class ParseError(Exception):
+    pass
 
 
 def ident(name: str) -> str:
@@ -159,11 +163,6 @@ def build_parse_edges(
     Each edge is (indicator_field, indicator_value, next_state) and is keyed
     by the header whose select expression triggers the transition.
 
-    Layering composition contributes edges from the underlay header to the
-    overlay header (e.g. eth1.ether_type -> ip1).  Session protocol entries on
-    each network instance contribute edges from that instance's header to the
-    session protocol header (e.g. ip1.protocol -> tcp).
-
     The parser root is the lowest-level network instance — whichever instance
     is not itself an overlay in any layering composition.
     """
@@ -202,7 +201,6 @@ def build_parse_edges(
 
 
 def render_parser(cna: dict[str, Any], headers: dict[str, list[dict[str, Any]]]) -> str:
-    header_names = set(headers.keys())
     edges, root = build_parse_edges(cna)
 
     states: list[str] = []
@@ -228,7 +226,8 @@ def render_parser(cna: dict[str, Any], headers: dict[str, list[dict[str, Any]]])
         next_edges = edges.get(hname, [])
         if next_edges:
             # All edges for one header share the same indicator field
-            field_expr = as_expr_indicator(next_edges[0][0], header_names)
+            field_name = next_edges[0][0]
+            field_expr = f"hdr.{hname}.{field_name}"
             states.append(f"        transition select({field_expr}) {{")
             for _, value, nxt in next_edges:
                 states.append(f"            {value}: parse_{nxt};")
@@ -265,20 +264,20 @@ def render_action(action: dict[str, Any], header_names: set[str]) -> tuple[str, 
     else:
         for operation in operations:
             op = operation.get("op")
-            if op == ForwardAction.SetField:
+            if op == Action.SetField:
                 target = as_expr_target(operation["target"], header_names)
                 value = as_expr_value(operation["value"])
                 out.append(f"    {target} = {value};")
-            elif op == ForwardAction.Decrement:
+            elif op == Action.Decrement:
                 target = as_expr_target(operation["target"], header_names)
                 amount = operation.get("amount", 1)
                 out.append(f"    {target} = {target} - {amount};")
-            elif op == ForwardAction.SetEgressPort:
+            elif op == Action.SetEgressPort:
                 value = as_expr_value(operation["value"])
                 out.append(f"    standard_metadata.egress_spec = {value};")
-            elif op == ForwardAction.Drop:
+            elif op == Action.Drop:
                 out.append("    mark_to_drop(standard_metadata);")
-            elif op == ForwardAction.Noop:
+            elif op == Action.Noop:
                 out.append("    ;")
             else:
                 out.append(f"    // unsupported operation: {op}")
@@ -323,13 +322,9 @@ def render_ingress(
 
         rendered_actions: list[tuple[str, dict[str, Any]]] = []
         for a in actions:
-            # Deduplicate action names across groups
-            base_name = ident(a["id"])
-            name = base_name
-            i = 1
-            while name in used_names:
-                i += 1
-                name = f"{base_name}_{i}"
+            name = ident(a["id"])
+            if name in used_names:
+                raise ParseError(f"Duplicated identifier in actions: {name}")
             used_names.add(name)
 
             action_copy = dict(a)
@@ -399,12 +394,32 @@ def render_deparser(headers: dict[str, list[dict[str, Any]]]) -> str:
     out = ["control DeparserImpl(packet_out packet, in headers_t hdr) {", "    apply {"]
     for hname in headers.keys():
         header = f"hdr.{hname}"
-        out.append(indent_line(f"if ({header}.isValid()) {{", 2))
-        out.append(indent_line(f"packet.emit({header});", 3))
-        out.append(indent_line("}", 2))
+        # out.append(indent_line(f"if ({header}.isValid()) {{", 2))
+        # out.append(indent_line(f"packet.emit({header});", 3))
+        out.append(indent_line(f"packet.emit({header});", 2))
+        # out.append(indent_line("}", 2))
     out.append(indent_line("}", 1))
     out.append("}")
     return "\n".join(out)
+
+
+# empty for now
+def render_verify_checksum() -> str:
+    """Render verify checksum control block"""
+    return (
+        "control EmptyVerifyChecksum(inout headers_t hdr, inout metadata_t meta) {\n"
+        "    apply { }\n"
+        "}"
+    )
+
+# also empty for now
+def render_compute_checksum() -> str:
+    """Render compute checksum control block"""
+    return (
+        "control EmptyComputeChecksum(inout headers_t hdr, inout metadata_t meta) {\n"
+        "    apply { }\n"
+        "}"
+    )
 
 
 def generate_p4(cna: dict[str, Any]) -> str:
@@ -434,12 +449,18 @@ def generate_p4(cna: dict[str, Any]) -> str:
         "",
         render_deparser(headers),
         "",
+        render_verify_checksum(),
+        "",
+        render_compute_checksum(),
+        "",
         "V1Switch(",
         "    ParserImpl(),",
+        "    EmptyVerifyChecksum(),",
         "    IngressImpl(),",
         "    EgressImpl(),",
+        "    EmptyComputeChecksum(),",
         "    DeparserImpl()",
-        ") main;",
+        ") main;"
     ]
 
     return "\n".join(parts).rstrip() + "\n"
