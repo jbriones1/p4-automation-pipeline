@@ -1,10 +1,11 @@
 {
-  "cna_version": "0.5",
-  "name": "ethernet_ipv4_tcp_udp",
+  "cna_version": "0.6",
+  "name": "ethernet_ipv4_gre_subduction",
   "consts": [
     { "field": "IPV4_ETHTYPE", "bit_width": "16", "value": "0x800" },
+    { "field": "TCP_PROTO", "bit_width": "8", "value": 6 },
     { "field": "UDP_PROTO", "bit_width": "8", "value": 17 },
-    { "field": "TCP_PROTO", "bit_width": "8", "value": 6 }
+    { "field": "GRE_PROTO", "bit_width": "8", "value": 47 }
   ],
   "typedefs": [
     { "field": "macAddr_t", "bit_width": 48 },
@@ -39,6 +40,15 @@
         { "field": "hdr_checksum", "bit_width": 16 },
         { "field": "src_addr", "type": "ip4Addr_t" },
         { "field": "dst_addr", "type": "ip4Addr_t" }
+      ]
+    },
+    {
+      "id": "gre",
+      "role": "forwarding",
+      "headers": [
+        { "field": "flags", "bit_width": 4 },
+        { "field": "version", "bit_width": 12 },
+        { "field": "proto", "bit_width": 16 }
       ]
     },
     {
@@ -83,6 +93,10 @@
           "indicator_value": "TCP_PROTO"
         }
       ]
+    },
+    {
+      "id": "gre1",
+      "type": "gre"
     },
     {
       "id": "ip2",
@@ -139,33 +153,40 @@
       ]
     },
     {
-      "operator": "layering",
-      "overlay": "eth1",
+      "operator": "subduction",
+      "overlay": "ip2",
       "underlay": "ip1",
-      "session_identifier": {
-        "field": "ip1.ether_type",
-        "value": "IPV4_ETHTYPE"
-      },
+      "bridged_with": "eth1",
+      "encapsulation_protocol": "gre1",
+      "shared_links": [
+        {
+          "id": "gre_entry",
+          "direction": "ingress",
+          "selection_predicate": {
+            "field": "ip1.protocol",
+            "match": "exact",
+            "value": "GRE_PROTO"
+          }
+        },
+        {
+          "id": "gre_exit",
+          "direction": "egress",
+          "delegate_to_underlay": true
+        }
+      ],
       "forwarding_actions": [
         {
-          "id": "eth1_forward",
+          "id": "tunnel_forward",
           "parameters": [
-            { "name": "dst_mac", "type": "macAddr_t" },
-            { "name": "src_mac", "type": "macAddr_t" },
+            { "name": "outer_dst", "type": "ip4Addr_t" },
             { "name": "egress_port", "type": "port_t" }
           ],
           "operations": [
             {
               "op": "set_field",
-              "target": "eth1.dst_addr",
-              "value": { "from_param": "dst_mac" }
+              "target": "ip1.dst_addr",
+              "value": { "from_param": "outer_dst" }
             },
-            {
-              "op": "set_field",
-              "target": "eth1.src_addr",
-              "value": { "from_param": "src_mac" }
-            },
-            { "op": "decrement", "target": "ip1.ttl", "amount": 1 },
             {
               "op": "set_egress_port",
               "value": { "from_param": "egress_port" }
@@ -173,25 +194,7 @@
           ]
         },
         {
-          "id": "eth_drop",
-          "parameters": [],
-          "operations": [{ "op": "drop" }]
-        }
-      ]
-    }
-  ],
-  "services": [
-    {
-      "id": "acl",
-      "network": "ip1",
-      "actions": [
-        {
-          "id": "allow",
-          "parameters": [],
-          "operations": [{ "op": "noop" }]
-        },
-        {
-          "id": "deny",
+          "id": "tunnel_drop",
           "parameters": [],
           "operations": [{ "op": "drop" }]
         }
