@@ -23,7 +23,8 @@ def ident(name: str) -> str:
 
 
 def strip_header_prefix(field: str) -> str:
-    """Strip a leading 'networkId.' prefix from a qualified field reference.
+    """
+    Strip a leading 'networkId.' prefix from a qualified field reference.
 
     Example: 'ip1.protocol' -> 'protocol'
     This normalises indicator_field and selection_predicate field values so the
@@ -157,9 +158,48 @@ def render_metadata_struct() -> str:
     return "struct metadata_t {\n}"
 
 
+def check_composition_cycles(cna: dict[str, Any]) -> None:
+    """
+    Raise ParseError if the composition graph contains a cycle.
+
+    Each composition entry contributes a directed edge from underlay to overlay.
+    A cycle means some network is both an ancestor and a descendant of itself,
+    e.g. net1 -> net2 in one entry and net2 -> net1 in another.
+
+    As a side effect this guarantees the composition graph is a DAG, which is a
+    precondition for the parser ordering to be well-defined.
+    """
+    graph: dict[str, list[str]] = {}
+    for comp in cna.get("composition", []):
+        underlay = ident(comp.get("underlay", ""))
+        overlay = ident(comp.get("overlay", ""))
+        if underlay and overlay:
+            graph.setdefault(underlay, []).append(overlay)
+
+    visited: set[str] = set()
+    in_stack: set[str] = set()
+
+    def dfs(node: str) -> None:
+        visited.add(node)
+        in_stack.add(node)
+        for neighbour in graph.get(node, []):
+            if neighbour not in visited:
+                dfs(neighbour)
+            elif neighbour in in_stack:
+                raise ParseError(
+                    f"Cycle detected in composition: "
+                    f"'{neighbour}' is both an ancestor and descendant of itself"
+                )
+        in_stack.remove(node)
+
+    for node in list(graph.keys()):
+        if node not in visited:
+            dfs(node)
+
+
 def build_parse_edges(
     cna: dict[str, Any],
-) -> tuple[dict[str, list[tuple[str, str, str]]], str]:
+) -> tuple[dict[str, list[tuple[str, str, str]]], str, set[str]]:
     """
     Build a graph of parser transitions.
 
@@ -168,6 +208,13 @@ def build_parse_edges(
                         An empty string signals a *direct* transition (no select).
       - indicator_value the constant value that triggers the transition.
       - next_state      the header state to transition into.
+
+    Returns (edges, root, conditional_headers) where conditional_headers is the
+    set of header names that are only extracted on a conditional parser branch.
+    This includes overlay networks, encapsulation protocols, and session
+    protocols — anything that is not unconditionally extracted from the root.
+    The caller uses this set to decide which deparser emit() calls need an
+    isValid() guard.
 
     Operator handling
     -----------------
@@ -219,9 +266,9 @@ def build_parse_edges(
                     continue
                 field_name = strip_header_prefix(field)
                 # Packets matching the predicate rise through the
-                # encapsulation protocol first (e.g. GRE), then to the
-                # overlay.  If there is no encapsulation protocol they
-                # jump directly to the overlay.
+                # encapsulation protocol first, then to the overlay.
+                # If there is no encapsulation protocol they jump directly
+                # to the overlay.
                 target = ident(enc_proto) if enc_proto else overlay
                 edges.setdefault(underlay, []).append((field_name, value, target))
 
@@ -232,7 +279,9 @@ def build_parse_edges(
                 # to overlay header — represented by an empty field_name.
                 edges[enc_id] = [("", "", overlay)]
 
-    # Session protocols embedded in each network instance
+    # Session protocols are also conditional: they are only extracted when
+    # their indicator field matches, so they belong in conditional_headers too.
+    session_protos: set[str] = set()
     for net in cna.get("networks", []):
         net_id = ident(net["id"])
         for s in net.get("session_protocols", []):
@@ -242,14 +291,17 @@ def build_parse_edges(
             value = s.get("indicator_value", "")
             if field_name and value:
                 edges.setdefault(net_id, []).append((field_name, value, proto))
+                session_protos.add(proto)
+
+    conditional_headers = overlays | session_protos
 
     roots = [n for n in networks if n not in overlays]
     root = roots[0] if roots else (networks[0] if networks else "")
-    return edges, root
+    return edges, root, conditional_headers
 
 
 def render_parser(cna: dict[str, Any], headers: dict[str, list[dict[str, Any]]]) -> str:
-    edges, root = build_parse_edges(cna)
+    edges, root, _ = build_parse_edges(cna)
 
     states: list[str] = []
     states.append(
@@ -357,16 +409,11 @@ def render_ingress(
     each table with a header-validity check so that:
 
       * Subduction overlay tables are applied first (higher priority): a packet
-        carrying the inner overlay header (e.g. ip2 inside a GRE tunnel) is
-        forwarded according to the overlay's rules.
+        carrying the inner overlay header is forwarded according to the overlay's
+        rules.
       * Layering tables are applied in an else-if chain after subduction: a
         plain packet that never entered the overlay falls through to its own
         forwarding table.
-
-    This mirrors the textbook's shared-link selection predicate — at the
-    point where packets diverge (GRE vs plain IP), the P4 program routes
-    control flow to the correct table based on which headers were extracted
-    by the parser.
     """
     header_names = set(headers.keys())
 
@@ -473,10 +520,33 @@ def render_egress() -> str:
     )
 
 
-def render_deparser(headers: dict[str, list[dict[str, Any]]]) -> str:
+def render_deparser(
+    cna: dict[str, Any],
+    headers: dict[str, list[dict[str, Any]]],
+) -> str:
+    """
+    Generate the deparser control block.
+
+    Headers that are only extracted on a conditional parser branch (overlays,
+    encapsulation protocols, and session protocols) are wrapped in an isValid()
+    guard to make the conditionality explicit.  Headers that are always
+    extracted (the parser root and any unconditional successor) are emitted
+    without a guard.
+
+    Although P4's emit() is already a no-op for invalid headers, the explicit
+    guards make the deparser self-documenting: a reader can see which headers
+    are optional without tracing the parser graph.
+    """
+    _, _, conditional_headers = build_parse_edges(cna)
+
     out = ["control DeparserImpl(packet_out packet, in headers_t hdr) {", "    apply {"]
     for hname in headers.keys():
-        out.append(indent_line(f"packet.emit(hdr.{hname});", 2))
+        if hname in conditional_headers:
+            out.append(indent_line(f"if (hdr.{hname}.isValid()) {{", 2))
+            out.append(indent_line(f"    packet.emit(hdr.{hname});", 2))
+            out.append(indent_line("}", 2))
+        else:
+            out.append(indent_line(f"packet.emit(hdr.{hname});", 2))
     out.append(indent_line("}", 1))
     out.append("}")
     return "\n".join(out)
@@ -499,6 +569,8 @@ def render_compute_checksum() -> str:
 
 
 def generate_p4(cna: dict[str, Any]) -> str:
+    check_composition_cycles(cna)
+
     consts_txt = render_consts(cna.get("consts", []))
     typedefs_txt, typedefs = render_typedefs(cna.get("typedefs", []))
     headers = collect_headers(cna)
@@ -523,7 +595,7 @@ def generate_p4(cna: dict[str, Any]) -> str:
         "",
         render_egress(),
         "",
-        render_deparser(headers),
+        render_deparser(cna, headers),
         "",
         render_verify_checksum(),
         "",
@@ -550,7 +622,7 @@ def main() -> None:
     _ = parser.add_argument(
         "-o",
         "--output",
-        help="Output P4 file (default: <name>.p4 derived from CNA root 'name')",
+        help="Output P4 file (default: <n>.p4 derived from CNA root 'name')",
     )
     args = parser.parse_args()
 
@@ -577,4 +649,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

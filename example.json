@@ -1,5 +1,5 @@
 {
-  "cna_version": "0.6",
+  "cna_version": "0.7",
   "name": "ethernet_ipv4_gre_subduction",
   "consts": [
     { "field": "IPV4_ETHTYPE", "bit_width": "16", "value": "0x800" },
@@ -156,7 +156,6 @@
       "operator": "subduction",
       "overlay": "ip2",
       "underlay": "ip1",
-      "bridged_with": "eth1",
       "encapsulation_protocol": "gre1",
       "shared_links": [
         {
