@@ -1,0 +1,171 @@
+{
+  "cna_version": "1.0",
+  "name": "cycle",
+  "consts": [
+    { "field": "IPV4_ETHTYPE", "bit_width": "16", "value": "0x800" },
+    { "field": "TCP_PROTO", "bit_width": "8", "value": 6 },
+    { "field": "UDP_PROTO", "bit_width": "8", "value": 17 }
+  ],
+  "typedefs": [
+    { "field": "macAddr_t", "bit_width": 48 },
+    { "field": "ip4Addr_t", "bit_width": 32 },
+    { "field": "etherType_t", "bit_width": 16 },
+    { "field": "port_t", "bit_width": 9 },
+    { "field": "l4Port_t", "bit_width": 16 }
+  ],
+  "protocols": [
+    {
+      "id": "ethernet",
+      "role": "forwarding",
+      "headers": [
+        { "field": "dst_addr", "type": "macAddr_t" },
+        { "field": "src_addr", "type": "macAddr_t" },
+        { "field": "ether_type", "type": "etherType_t" }
+      ]
+    },
+    {
+      "id": "ipv4",
+      "role": "forwarding",
+      "headers": [
+        { "field": "version", "bit_width": 4 },
+        { "field": "ihl", "bit_width": 4 },
+        { "field": "diffserv", "bit_width": 8 },
+        { "field": "total_len", "bit_width": 16 },
+        { "field": "identification", "bit_width": 16 },
+        { "field": "flags", "bit_width": 3 },
+        { "field": "frag_offset", "bit_width": 13 },
+        { "field": "ttl", "bit_width": 8 },
+        { "field": "protocol", "bit_width": 8 },
+        { "field": "hdr_checksum", "bit_width": 16 },
+        { "field": "src_addr", "type": "ip4Addr_t" },
+        { "field": "dst_addr", "type": "ip4Addr_t" }
+      ]
+    },
+    {
+      "id": "tcp",
+      "role": "session",
+      "headers": [
+        { "field": "src_port", "type": "l4Port_t" },
+        { "field": "dst_port", "type": "l4Port_t" },
+        { "field": "seq_no", "bit_width": 32 },
+        { "field": "ack_no", "bit_width": 32 },
+        { "field": "data_off", "bit_width": 4 },
+        { "field": "res", "bit_width": 4 },
+        { "field": "flags", "bit_width": 8 },
+        { "field": "window", "bit_width": 16 },
+        { "field": "checksum", "bit_width": 16 },
+        { "field": "urg_ptr", "bit_width": 16 }
+      ]
+    },
+    {
+      "id": "udp",
+      "role": "session",
+      "headers": [
+        { "field": "src_port", "type": "l4Port_t" },
+        { "field": "dst_port", "type": "l4Port_t" },
+        { "field": "length", "bit_width": 16 },
+        { "field": "checksum", "bit_width": 16 }
+      ]
+    }
+  ],
+  "networks": [
+    { "id": "eth1", "type": "ethernet" },
+    {
+      "id": "ip1",
+      "type": "ipv4",
+      "session_protocols": [
+        {
+          "protocol": "tcp",
+          "indicator_field": "ip1.protocol",
+          "indicator_value": "TCP_PROTO"
+        }
+      ]
+    }
+  ],
+  "composition": [
+    {
+      "operator": "layering",
+      "overlay": "ip1",
+      "underlay": "eth1",
+      "session_identifier": {
+        "field": "eth1.ether_type",
+        "value": "IPV4_ETHTYPE"
+      },
+      "match_keys": [{ "field": "ip1.dst_addr", "match": "lpm" }],
+      "forwarding_actions": [
+        {
+          "id": "ipv4_forward_2",
+          "parameters": [
+            { "name": "dst_mac", "type": "macAddr_t" },
+            { "name": "src_mac", "type": "macAddr_t" },
+            { "name": "egress_port", "type": "port_t" }
+          ],
+          "operations": [
+            {
+              "op": "set_field",
+              "target": "eth1.dst_addr",
+              "value": { "from_param": "dst_mac" }
+            },
+            {
+              "op": "set_field",
+              "target": "eth1.src_addr",
+              "value": { "from_param": "src_mac" }
+            },
+            { "op": "decrement", "target": "ip1.ttl", "amount": 1 },
+            {
+              "op": "set_egress_port",
+              "value": { "from_param": "egress_port" }
+            }
+          ]
+        },
+        {
+          "id": "drop",
+          "parameters": [],
+          "operations": [{ "op": "drop" }]
+        }
+      ]
+    },
+    {
+      "operator": "layering",
+      "overlay": "eth1",
+      "underlay": "ip1",
+      "session_identifier": {
+        "field": "eth1.ether_type",
+        "value": "IPV4_ETHTYPE"
+      },
+      "match_keys": [{ "field": "ip1.dst_addr", "match": "lpm" }],
+      "forwarding_actions": [
+        {
+          "id": "ipv4_forward",
+          "parameters": [
+            { "name": "dst_mac", "type": "macAddr_t" },
+            { "name": "src_mac", "type": "macAddr_t" },
+            { "name": "egress_port", "type": "port_t" }
+          ],
+          "operations": [
+            {
+              "op": "set_field",
+              "target": "eth1.dst_addr",
+              "value": { "from_param": "dst_mac" }
+            },
+            {
+              "op": "set_field",
+              "target": "eth1.src_addr",
+              "value": { "from_param": "src_mac" }
+            },
+            { "op": "decrement", "target": "ip1.ttl", "amount": 1 },
+            {
+              "op": "set_egress_port",
+              "value": { "from_param": "egress_port" }
+            }
+          ]
+        },
+        {
+          "id": "drop2",
+          "parameters": [],
+          "operations": [{ "op": "drop" }]
+        }
+      ]
+    }
+  ]
+}
