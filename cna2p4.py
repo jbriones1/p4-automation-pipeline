@@ -23,8 +23,7 @@ def ident(name: str) -> str:
 
 
 def strip_header_prefix(field: str) -> str:
-    """
-    Strip a leading 'networkId.' prefix from a qualified field reference.
+    """Strip a leading 'networkId.' prefix from a qualified field reference.
 
     Example: 'ip1.protocol' -> 'protocol'
     This normalises indicator_field and selection_predicate field values so the
@@ -187,8 +186,8 @@ def check_composition_cycles(cna: dict[str, Any]) -> None:
                 dfs(neighbour)
             elif neighbour in in_stack:
                 raise ParseError(
-                    f"Cycle detected in composition: "
-                    f"'{neighbour}' is both an ancestor and descendant of itself"
+                    "Cycle detected in composition: "
+                    + f"'{neighbour}' is both an ancestor and descendant of itself"
                 )
         in_stack.remove(node)
 
@@ -210,11 +209,9 @@ def build_parse_edges(
       - next_state      the header state to transition into.
 
     Returns (edges, root, conditional_headers) where conditional_headers is the
-    set of header names that are only extracted on a conditional parser branch.
-    This includes overlay networks, encapsulation protocols, and session
-    protocols — anything that is not unconditionally extracted from the root.
-    The caller uses this set to decide which deparser emit() calls need an
-    isValid() guard.
+    set of header names only extracted on a conditional parser branch — overlays,
+    encapsulation protocols, and session protocols.  The caller uses this to
+    decide which deparser emit() calls need an isValid() guard.
 
     Operator handling
     -----------------
@@ -256,8 +253,6 @@ def build_parse_edges(
 
             for sl in comp.get("shared_links", []):
                 if sl.get("direction", "ingress") != "ingress":
-                    # egress / delegate_to_underlay shared links are a
-                    # forwarding concern, not a parser concern.
                     continue
                 pred = sl.get("selection_predicate", {})
                 field = pred.get("field", "")
@@ -265,10 +260,6 @@ def build_parse_edges(
                 if not (field and value):
                     continue
                 field_name = strip_header_prefix(field)
-                # Packets matching the predicate rise through the
-                # encapsulation protocol first, then to the overlay.
-                # If there is no encapsulation protocol they jump directly
-                # to the overlay.
                 target = ident(enc_proto) if enc_proto else overlay
                 edges.setdefault(underlay, []).append((field_name, value, target))
 
@@ -279,8 +270,8 @@ def build_parse_edges(
                 # to overlay header — represented by an empty field_name.
                 edges[enc_id] = [("", "", overlay)]
 
-    # Session protocols are also conditional: they are only extracted when
-    # their indicator field matches, so they belong in conditional_headers too.
+    # Session protocols are also conditional: only extracted when their
+    # indicator field matches, so they belong in conditional_headers too.
     session_protos: set[str] = set()
     for net in cna.get("networks", []):
         net_id = ident(net["id"])
@@ -414,6 +405,7 @@ def render_ingress(
       * Layering tables are applied in an else-if chain after subduction: a
         plain packet that never entered the overlay falls through to its own
         forwarding table.
+
     """
     header_names = set(headers.keys())
 
@@ -527,11 +519,10 @@ def render_deparser(
     """
     Generate the deparser control block.
 
-    Headers that are only extracted on a conditional parser branch (overlays,
+    Headers only extracted on a conditional parser branch (overlays,
     encapsulation protocols, and session protocols) are wrapped in an isValid()
-    guard to make the conditionality explicit.  Headers that are always
-    extracted (the parser root and any unconditional successor) are emitted
-    without a guard.
+    guard to make the conditionality explicit.  Headers always extracted (the
+    parser root and any unconditional successor) are emitted without a guard.
 
     Although P4's emit() is already a no-op for invalid headers, the explicit
     guards make the deparser self-documenting: a reader can see which headers
@@ -622,7 +613,7 @@ def main() -> None:
     _ = parser.add_argument(
         "-o",
         "--output",
-        help="Output P4 file (default: <n>.p4 derived from CNA root 'name')",
+        help="Output P4 file (default: <name>.p4 derived from CNA root 'name')",
     )
     args = parser.parse_args()
 

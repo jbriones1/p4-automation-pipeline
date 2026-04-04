@@ -1,6 +1,6 @@
 {
-  "cna_version": "0.7",
-  "name": "ethernet_ipv4_gre_subduction",
+  "cna_version": "0.9",
+  "name": "ethernet_ipv4_subduction",
   "consts": [
     { "field": "IPV4_ETHTYPE", "bit_width": "16", "value": "0x800" },
     { "field": "TCP_PROTO", "bit_width": "8", "value": 6 },
@@ -79,10 +79,7 @@
     }
   ],
   "networks": [
-    {
-      "id": "eth1",
-      "type": "ethernet"
-    },
+    { "id": "eth1", "type": "ethernet" },
     {
       "id": "ip1",
       "type": "ipv4",
@@ -94,10 +91,7 @@
         }
       ]
     },
-    {
-      "id": "gre1",
-      "type": "gre"
-    },
+    { "id": "gre1", "type": "gre" },
     {
       "id": "ip2",
       "type": "ipv4",
@@ -119,6 +113,7 @@
         "field": "eth1.ether_type",
         "value": "IPV4_ETHTYPE"
       },
+      "match_keys": [{ "field": "ip1.dst_addr", "match": "lpm" }],
       "forwarding_actions": [
         {
           "id": "ipv4_forward",
@@ -173,6 +168,7 @@
           "delegate_to_underlay": true
         }
       ],
+      "match_keys": [{ "field": "ip2.dst_addr", "match": "lpm" }],
       "forwarding_actions": [
         {
           "id": "tunnel_forward",
