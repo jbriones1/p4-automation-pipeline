@@ -1,11 +1,10 @@
 {
-  "cna_version": "0.9",
-  "name": "ethernet_ipv4_subduction",
+  "cna_version": "1.0",
+  "name": "cycle",
   "consts": [
     { "field": "IPV4_ETHTYPE", "bit_width": "16", "value": "0x800" },
     { "field": "TCP_PROTO", "bit_width": "8", "value": 6 },
-    { "field": "UDP_PROTO", "bit_width": "8", "value": 17 },
-    { "field": "GRE_PROTO", "bit_width": "8", "value": 47 }
+    { "field": "UDP_PROTO", "bit_width": "8", "value": 17 }
   ],
   "typedefs": [
     { "field": "macAddr_t", "bit_width": 48 },
@@ -40,15 +39,6 @@
         { "field": "hdr_checksum", "bit_width": 16 },
         { "field": "src_addr", "type": "ip4Addr_t" },
         { "field": "dst_addr", "type": "ip4Addr_t" }
-      ]
-    },
-    {
-      "id": "gre",
-      "role": "forwarding",
-      "headers": [
-        { "field": "flags", "bit_width": 4 },
-        { "field": "version", "bit_width": 12 },
-        { "field": "proto", "bit_width": 16 }
       ]
     },
     {
@@ -90,18 +80,6 @@
           "indicator_value": "TCP_PROTO"
         }
       ]
-    },
-    { "id": "gre1", "type": "gre" },
-    {
-      "id": "ip2",
-      "type": "ipv4",
-      "session_protocols": [
-        {
-          "protocol": "udp",
-          "indicator_field": "ip2.protocol",
-          "indicator_value": "UDP_PROTO"
-        }
-      ]
     }
   ],
   "composition": [
@@ -109,6 +87,48 @@
       "operator": "layering",
       "overlay": "ip1",
       "underlay": "eth1",
+      "session_identifier": {
+        "field": "eth1.ether_type",
+        "value": "IPV4_ETHTYPE"
+      },
+      "match_keys": [{ "field": "ip1.dst_addr", "match": "lpm" }],
+      "forwarding_actions": [
+        {
+          "id": "ipv4_forward_2",
+          "parameters": [
+            { "name": "dst_mac", "type": "macAddr_t" },
+            { "name": "src_mac", "type": "macAddr_t" },
+            { "name": "egress_port", "type": "port_t" }
+          ],
+          "operations": [
+            {
+              "op": "set_field",
+              "target": "eth1.dst_addr",
+              "value": { "from_param": "dst_mac" }
+            },
+            {
+              "op": "set_field",
+              "target": "eth1.src_addr",
+              "value": { "from_param": "src_mac" }
+            },
+            { "op": "decrement", "target": "ip1.ttl", "amount": 1 },
+            {
+              "op": "set_egress_port",
+              "value": { "from_param": "egress_port" }
+            }
+          ]
+        },
+        {
+          "id": "drop",
+          "parameters": [],
+          "operations": [{ "op": "drop" }]
+        }
+      ]
+    },
+    {
+      "operator": "layering",
+      "overlay": "eth1",
+      "underlay": "ip1",
       "session_identifier": {
         "field": "eth1.ether_type",
         "value": "IPV4_ETHTYPE"
@@ -141,55 +161,7 @@
           ]
         },
         {
-          "id": "drop",
-          "parameters": [],
-          "operations": [{ "op": "drop" }]
-        }
-      ]
-    },
-    {
-      "operator": "subduction",
-      "overlay": "ip2",
-      "underlay": "ip1",
-      "encapsulation_protocol": "gre1",
-      "shared_links": [
-        {
-          "id": "gre_entry",
-          "direction": "ingress",
-          "selection_predicate": {
-            "field": "ip1.protocol",
-            "match": "exact",
-            "value": "GRE_PROTO"
-          }
-        },
-        {
-          "id": "gre_exit",
-          "direction": "egress",
-          "delegate_to_underlay": true
-        }
-      ],
-      "match_keys": [{ "field": "ip2.dst_addr", "match": "lpm" }],
-      "forwarding_actions": [
-        {
-          "id": "tunnel_forward",
-          "parameters": [
-            { "name": "outer_dst", "type": "ip4Addr_t" },
-            { "name": "egress_port", "type": "port_t" }
-          ],
-          "operations": [
-            {
-              "op": "set_field",
-              "target": "ip1.dst_addr",
-              "value": { "from_param": "outer_dst" }
-            },
-            {
-              "op": "set_egress_port",
-              "value": { "from_param": "egress_port" }
-            }
-          ]
-        },
-        {
-          "id": "tunnel_drop",
+          "id": "drop2",
           "parameters": [],
           "operations": [{ "op": "drop" }]
         }
