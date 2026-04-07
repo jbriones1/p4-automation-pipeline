@@ -440,9 +440,20 @@ def render_ingress(
             action_defs.append(action_code)
             rendered_actions.append((action_name, action_copy))
 
+        match_keys = comp.get("match_keys", [])
+
         tbl = ident(f"{gname}_tbl")
         table_defs.append(f"table {tbl} {{")
         table_defs.append("    key = {")
+        for mk in match_keys:
+            field = mk.get("field", "")
+            match = mk.get("match", "exact")
+            parts = field.split(".")
+            if len(parts) >= 2 and ident(parts[0]) in header_names:
+                field_expr = "hdr." + ".".join(ident(p) for p in parts)
+            else:
+                field_expr = field
+            table_defs.append(f"        {field_expr} : {match};")
         table_defs.append("    }")
         table_defs.append("    actions = {")
         for an, _ in rendered_actions:

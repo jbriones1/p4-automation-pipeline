@@ -1,11 +1,11 @@
 {
-  "cna_version": "0.9",
+  "cna_version": "1.0",
   "name": "ethernet_ipv4_subduction",
   "consts": [
-    { "field": "IPV4_ETHTYPE", "bit_width": "16", "value": "0x800" },
-    { "field": "TCP_PROTO", "bit_width": "8", "value": 6 },
-    { "field": "UDP_PROTO", "bit_width": "8", "value": 17 },
-    { "field": "GRE_PROTO", "bit_width": "8", "value": 47 }
+    { "field": "IPV4_ETHTYPE", "bit_width": 16, "value": "0x800" },
+    { "field": "TCP_PROTO", "bit_width": 8, "value": 6 },
+    { "field": "UDP_PROTO", "bit_width": 8, "value": 17 },
+    { "field": "GRE_PROTO", "bit_width": 8, "value": 47 }
   ],
   "typedefs": [
     { "field": "macAddr_t", "bit_width": 48 },
