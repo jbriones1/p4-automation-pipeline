@@ -1,0 +1,472 @@
+{
+  "title": "Compositional Network Architecture (CNA) Definition",
+  "type": "object",
+  "required": ["cna_version", "name", "protocols", "networks", "composition"],
+  "additionalProperties": false,
+  "properties": {
+    "cna_version": {
+      "type": "string",
+      "description": "Version of the CNA specification being used.",
+      "examples": ["0.9"]
+    },
+    "name": {
+      "type": "string",
+      "description": "Name of the network definition. Used as the output P4 filename when --output is not specified.",
+      "minLength": 1
+    },
+    "consts": {
+      "type": "array",
+      "description": "Named bit-width constants available as P4 const declarations and as indicator_value references.",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["field", "bit_width", "value"],
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "Name of the constant. Used verbatim as a P4 identifier (after sanitisation)."
+          },
+          "bit_width": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Width of the constant in bits."
+          },
+          "value": {
+            "oneOf": [
+              { "type": "integer", "description": "Decimal integer literal." },
+              {
+                "type": "string",
+                "description": "Hex literal (e.g. '0x800') or any valid P4 constant expression."
+              }
+            ],
+            "description": "Value of the constant."
+          }
+        }
+      }
+    },
+    "typedefs": {
+      "type": "array",
+      "description": "Named bit-width type aliases emitted as P4 typedef declarations. Can be referenced by name in header field definitions.",
+      "default": [],
+      "items": {
+        "type": "object",
+        "required": ["field", "bit_width"],
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "Name of the type alias (e.g. 'macAddr_t')."
+          },
+          "bit_width": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Width of the type in bits."
+          }
+        }
+      }
+    },
+    "protocols": {
+      "type": "array",
+      "description": "Protocol definitions. Each describes a set of header fields and a role.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "role", "headers"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for this protocol type. Referenced by networks[].type and composition[].encapsulation_protocol."
+          },
+          "role": {
+            "type": "string",
+            "enum": ["forwarding", "session"],
+            "description": "forwarding: instantiated per network instance, participates in composition and forwarding. session: instantiated once per type, attached to a network via session_protocols and extracted conditionally."
+          },
+          "headers": {
+            "type": "array",
+            "description": "Ordered list of fields in this protocol's header.",
+            "minItems": 1,
+            "items": { "$ref": "#/$defs/header_field" }
+          }
+        }
+      }
+    },
+    "networks": {
+      "type": "array",
+      "description": "Network instances. Each instantiates a forwarding protocol and optionally attaches session protocols.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique instance identifier. Becomes the P4 header name (e.g. 'eth1' -> header eth1_t)."
+          },
+          "type": {
+            "type": "string",
+            "description": "Protocol type to instantiate. Must match the id of a protocol with role 'forwarding'."
+          },
+          "session_protocols": {
+            "type": "array",
+            "description": "Session protocols conditionally extracted after this network's header based on a field value.",
+            "default": [],
+            "items": {
+              "type": "object",
+              "required": ["protocol", "indicator_field", "indicator_value"],
+              "additionalProperties": false,
+              "properties": {
+                "protocol": {
+                  "type": "string",
+                  "description": "id of a protocol with role 'session'."
+                },
+                "indicator_field": {
+                  "type": "string",
+                  "description": "Qualified field reference (networkId.fieldName) in this network's header whose value selects the session protocol."
+                },
+                "indicator_value": {
+                  "type": "string",
+                  "description": "Value the indicator_field must match to trigger extraction. May be a named constant from consts[] or a raw P4 literal (e.g. '6' or '0x06'). Emitted verbatim as a P4 select case label."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "composition": {
+      "type": "array",
+      "description": "Composition relationships between network instances.",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/layering_composition" },
+          { "$ref": "#/$defs/subduction_composition" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "header_field": {
+      "type": "object",
+      "required": ["field"],
+      "additionalProperties": false,
+      "description": "A single field within a protocol header. Must supply either 'type' (referencing a typedef) or 'bit_width'.",
+      "properties": {
+        "field": {
+          "type": "string",
+          "description": "Field name. Used as the P4 field identifier."
+        },
+        "type": {
+          "type": "string",
+          "description": "Named type alias. Must match the 'field' of an entry in typedefs[]."
+        },
+        "bit_width": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Explicit width in bits. Used when no named typedef applies."
+        }
+      },
+      "oneOf": [{ "required": ["type"] }, { "required": ["bit_width"] }]
+    },
+    "match_key": {
+      "type": "object",
+      "required": ["field", "match"],
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "type": "string",
+          "description": "Qualified field reference (networkId.fieldName) to match on. Translated to hdr.<networkId>.<fieldName> in the P4 table key."
+        },
+        "match": {
+          "type": "string",
+          "enum": ["exact", "lpm", "ternary", "range", "optional"],
+          "description": "P4 match kind."
+        }
+      }
+    },
+    "action_parameter": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "description": "A parameter passed into a forwarding action. Must supply either 'type' or 'bit_width'.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Parameter name."
+        },
+        "type": {
+          "type": "string",
+          "description": "Named type alias from typedefs[]."
+        },
+        "bit_width": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Explicit width in bits."
+        }
+      },
+      "oneOf": [
+        { "required": ["type"] },
+        { "required": ["bit_width"] },
+        {
+          "not": { "required": ["type"] },
+          "not2": { "not": { "required": ["bit_width"] } },
+          "description": "No type or bit_width — zero-parameter action."
+        }
+      ]
+    },
+    "operation": {
+      "type": "object",
+      "required": ["op"],
+      "description": "A single operation within a forwarding action.",
+      "oneOf": [
+        {
+          "description": "set_field: assign a value to a header field.",
+          "properties": {
+            "op": { "const": "set_field" },
+            "target": {
+              "type": "string",
+              "description": "Qualified field to write (networkId.fieldName)."
+            },
+            "value": {
+              "description": "Literal value or parameter reference.",
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": ["from_param"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "from_param": {
+                      "type": "string",
+                      "description": "Name of the action parameter whose value to use."
+                    }
+                  }
+                },
+                { "type": "string" },
+                { "type": "integer" }
+              ]
+            }
+          },
+          "required": ["op", "target", "value"],
+          "additionalProperties": false
+        },
+        {
+          "description": "decrement: subtract a fixed amount from a header field.",
+          "properties": {
+            "op": { "const": "decrement" },
+            "target": {
+              "type": "string",
+              "description": "Qualified field to decrement (networkId.fieldName)."
+            },
+            "amount": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "description": "Amount to subtract. Defaults to 1 if omitted."
+            }
+          },
+          "required": ["op", "target"],
+          "additionalProperties": false
+        },
+        {
+          "description": "set_egress_port: set standard_metadata.egress_spec.",
+          "properties": {
+            "op": { "const": "set_egress_port" },
+            "value": {
+              "description": "Port value or parameter reference.",
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": ["from_param"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "from_param": { "type": "string" }
+                  }
+                },
+                { "type": "string" },
+                { "type": "integer" }
+              ]
+            }
+          },
+          "required": ["op", "value"],
+          "additionalProperties": false
+        },
+        {
+          "description": "drop: mark packet to drop.",
+          "properties": {
+            "op": { "const": "drop" }
+          },
+          "required": ["op"],
+          "additionalProperties": false
+        },
+        {
+          "description": "noop: no operation.",
+          "properties": {
+            "op": { "const": "noop" }
+          },
+          "required": ["op"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "forwarding_action": {
+      "type": "object",
+      "required": ["id", "parameters", "operations"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique action identifier across all composition entries. Becomes the P4 action name."
+        },
+        "parameters": {
+          "type": "array",
+          "description": "Action parameters. Empty array for actions that take no arguments (e.g. drop).",
+          "items": { "$ref": "#/$defs/action_parameter" }
+        },
+        "operations": {
+          "type": "array",
+          "description": "Ordered list of operations this action performs.",
+          "items": { "$ref": "#/$defs/operation" }
+        }
+      }
+    },
+    "layering_composition": {
+      "type": "object",
+      "description": "Layering: the overlay protocol is carried inside the underlay, identified by a field value in the underlay header.",
+      "required": [
+        "operator",
+        "overlay",
+        "underlay",
+        "session_identifier",
+        "forwarding_actions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "operator": { "const": "layering" },
+        "overlay": {
+          "type": "string",
+          "description": "Network instance id of the overlay (inner) network."
+        },
+        "underlay": {
+          "type": "string",
+          "description": "Network instance id of the underlay (outer) network."
+        },
+        "session_identifier": {
+          "type": "object",
+          "required": ["field", "value"],
+          "additionalProperties": false,
+          "description": "The underlay header field and value that signals the overlay is present.",
+          "properties": {
+            "field": {
+              "type": "string",
+              "description": "Qualified field reference (networkId.fieldName) in the underlay header."
+            },
+            "value": {
+              "type": "string",
+              "description": "Value that triggers the parser transition to the overlay state. May be a named constant or raw P4 literal."
+            }
+          }
+        },
+        "match_keys": {
+          "type": "array",
+          "description": "Fields used as table match keys for forwarding decisions in the overlay.",
+          "default": [],
+          "items": { "$ref": "#/$defs/match_key" }
+        },
+        "forwarding_actions": {
+          "type": "array",
+          "description": "Actions available in the overlay's forwarding table.",
+          "items": { "$ref": "#/$defs/forwarding_action" }
+        }
+      }
+    },
+    "subduction_composition": {
+      "type": "object",
+      "description": "Subduction: the overlay is tunnelled through the underlay, optionally via an encapsulation protocol. Ingress shared_links define when to enter the tunnel.",
+      "required": [
+        "operator",
+        "overlay",
+        "underlay",
+        "shared_links",
+        "forwarding_actions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "operator": { "const": "subduction" },
+        "overlay": {
+          "type": "string",
+          "description": "Network instance id of the tunnelled (inner) network."
+        },
+        "underlay": {
+          "type": "string",
+          "description": "Network instance id of the encapsulating (outer) network."
+        },
+        "encapsulation_protocol": {
+          "type": "string",
+          "description": "Optional network instance id of an intermediate encapsulation header (e.g. GRE) between underlay and overlay. If present, the parser transitions underlay -> encapsulation -> overlay."
+        },
+        "shared_links": {
+          "type": "array",
+          "description": "Links that describe how packets enter and exit the tunnel.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "direction"],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Unique identifier for this shared link."
+              },
+              "direction": {
+                "type": "string",
+                "enum": ["ingress", "egress"],
+                "description": "ingress: packet enters the tunnel (parser selects overlay). egress: packet leaves the tunnel."
+              },
+              "selection_predicate": {
+                "type": "object",
+                "description": "Required for ingress links. The underlay field and value that identify a tunnelled packet.",
+                "required": ["field", "match", "value"],
+                "additionalProperties": false,
+                "properties": {
+                  "field": {
+                    "type": "string",
+                    "description": "Qualified field reference (networkId.fieldName) in the underlay header."
+                  },
+                  "match": {
+                    "type": "string",
+                    "enum": ["exact", "lpm", "ternary"],
+                    "description": "Match kind for this predicate."
+                  },
+                  "value": {
+                    "type": "string",
+                    "description": "Value that identifies a tunnelled packet. May be a named constant or raw P4 literal."
+                  }
+                }
+              },
+              "delegate_to_underlay": {
+                "type": "boolean",
+                "description": "For egress links: whether tunnel exit processing is delegated to the underlay network.",
+                "default": false
+              }
+            }
+          }
+        },
+        "match_keys": {
+          "type": "array",
+          "description": "Fields used as table match keys for forwarding decisions in the overlay.",
+          "default": [],
+          "items": { "$ref": "#/$defs/match_key" }
+        },
+        "forwarding_actions": {
+          "type": "array",
+          "description": "Actions available in the overlay's forwarding table.",
+          "items": { "$ref": "#/$defs/forwarding_action" }
+        }
+      }
+    }
+  }
+}
