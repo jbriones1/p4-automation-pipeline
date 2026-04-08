@@ -524,7 +524,6 @@ def render_egress() -> str:
 
 
 def render_deparser(
-    cna: dict[str, Any],
     headers: dict[str, list[dict[str, Any]]],
 ) -> str:
     """
@@ -539,16 +538,10 @@ def render_deparser(
     guards make the deparser self-documenting: a reader can see which headers
     are optional without tracing the parser graph.
     """
-    _, _, conditional_headers = build_parse_edges(cna)
 
     out = ["control DeparserImpl(packet_out packet, in headers_t hdr) {", "    apply {"]
     for hname in headers.keys():
-        if hname in conditional_headers:
-            out.append(indent_line(f"if (hdr.{hname}.isValid()) {{", 2))
-            out.append(indent_line(f"    packet.emit(hdr.{hname});", 2))
-            out.append(indent_line("}", 2))
-        else:
-            out.append(indent_line(f"packet.emit(hdr.{hname});", 2))
+        out.append(indent_line(f"packet.emit(hdr.{hname});", 2))
     out.append(indent_line("}", 1))
     out.append("}")
     return "\n".join(out)
@@ -597,7 +590,7 @@ def generate_p4(cna: dict[str, Any]) -> str:
         "",
         render_egress(),
         "",
-        render_deparser(cna, headers),
+        render_deparser(headers),
         "",
         render_verify_checksum(),
         "",
