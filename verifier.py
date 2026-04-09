@@ -33,17 +33,13 @@ def compile_p4(p4_file: str) -> bool:
     # create build directory if it don't exist
     build_dir = Path("build")
     build_dir.mkdir(exist_ok=True)
-    
-    # output JSON
-    p4_path = Path(p4_file)
-    output_file = build_dir / f"{p4_path.stem}.json"
-    
+
     # p4c command
     cmd = [
         "p4c",
         "--target", "bmv2",
         "--arch", "v1model",
-        "--output", str(output_file),
+        "--output", str(build_dir),
         p4_file
     ]
     
@@ -51,7 +47,9 @@ def compile_p4(p4_file: str) -> bool:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         
         if result.returncode == 0:
-            print(f"Compilation successful! Output: {output_file}")
+            p4_path = Path(p4_file)
+            expected_output = build_dir / f"{p4_path.stem}.json"
+            print(f"Compilation successful! Output: {expected_output}")
             return True
         else:
             print(f"Compilation failed")

@@ -11,6 +11,7 @@
 #
 #   --no-compile   Skip CNA→P4 and p4c steps; reuse existing .json artefacts
 #   --topo-only    Launch Mininet CLI without running automated tests
+#   --skip-verifier Skip running the P4 verifier
 # =============================================================================
 set -euo pipefail
 
@@ -22,11 +23,13 @@ P4_INCLUDES="${SCRIPT_DIR}/build"
 
 NO_COMPILE=false
 TOPO_ONLY=false
+SKIP_VERIFIER=false
 
 for arg in "$@"; do
   case $arg in
     --no-compile) NO_COMPILE=true ;;
     --topo-only)  TOPO_ONLY=true  ;;
+    --skip-verifier) SKIP_VERIFIER=true ;;
   esac
 done
 
@@ -36,7 +39,7 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-for cmd in python3 mn simple_switch; do
+for cmd in python3 mn simple_switch p4c; do
   command -v "$cmd" &>/dev/null || {
     echo "[ERROR] Required tool not found: $cmd" >&2
     exit 1
@@ -48,7 +51,7 @@ mkdir -p "${SCRIPT_DIR}/build" "${SCRIPT_DIR}/logs"
 # ── 1. CNA → P4 ───────────────────────────────────────────────────────────────
 if [[ "$NO_COMPILE" == false ]]; then
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo " Step 1/2 : CNA → P4 (cna2p4.py)"
+  echo " Step 1/4 : CNA → P4 (cna2p4.py)"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   python3 "${SCRIPT_DIR}/cna2p4.py" \
     "${CNA_JSON}" \
@@ -58,7 +61,7 @@ if [[ "$NO_COMPILE" == false ]]; then
   # ── 2. P4 → BMV2 JSON ───────────────────────────────────────────────────────
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo " Step 2/2 : P4 → BMV2 JSON (p4c)"
+  echo " Step 2/4 : P4 → BMV2 JSON (p4c)"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   p4c --target bmv2 \
       --arch v1model \
@@ -78,10 +81,26 @@ else
   [[ -f "${BMV2_JSON}" ]] || { echo "[ERROR] ${BMV2_JSON} not found." >&2; exit 1; }
 fi
 
-# ── 3. Launch Mininet ─────────────────────────────────────────────────────────
+# ── 3. Run verifier ─────────────────────────────────────────────────────────
+if [[ "$SKIP_VERIFIER" == false ]]; then
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo " Step 3/4   : P4 Verifier"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  if python3 "${SCRIPT_DIR}/verifier.py" "${CNA_JSON}" "${P4_SRC}"; then
+    echo "[OK] Verifier passed: P4 program matches CNA spec."
+  else
+    echo "[ERROR] Verifier failed: P4 program does not match CNA spec." >&2
+    exit 1
+  fi
+else
+  echo "[SKIP] Verifier skipped (--skip-verifier)"
+fi
+
+# ── 4. Launch Mininet ─────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " Step 3   : Mininet + BMV2"
+echo " Step 4/4   : Mininet + BMV2"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 TOPO_FLAG=""
