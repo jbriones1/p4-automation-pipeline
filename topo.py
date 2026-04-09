@@ -112,6 +112,11 @@ class SimpleSwitchNode(Host):
             os.makedirs(self.pcap_dir, exist_ok=True)
             pcap_args = ["--pcap", self.pcap_dir]
 
+        # Each switch needs a unique nanomsg IPC path; derive the index from
+        # the Thrift port offset so sw1(9090)→0, sw2(9091)→1, etc.
+        sw_index = self.thrift_port - SimpleSwitchNode.THRIFT_BASE
+        notif_addr = f"ipc:///tmp/bmv2-{sw_index}-notifications.ipc"
+
         cmd = (
             ["simple_switch"]
             + port_args
@@ -119,6 +124,8 @@ class SimpleSwitchNode(Host):
             + [
                 "--thrift-port",
                 str(self.thrift_port),
+                "--notifications-addr",
+                notif_addr,
                 "--log-console",
                 "--log-level",
                 "warn",
