@@ -6,28 +6,24 @@ Test environment for the P4 program compiled from `example.json` via `cna2p4.py`
 
 ## Topology
 
-```
-  10.0.1.1/24             10.0.12.0/30              10.0.2.1/24
-  h1 (MAC 00:00:00:00:01:01)                    h2 (MAC 00:00:00:00:02:01)
-   |                                                  |
-   | port 1                                    port 2 |
-   +──────[  sw1  ]──────────────────────[  sw2  ]───+
-          port 2 ↔ port 1      port 3 ↔ port 3
-   |      10.0.12.1/30  10.0.12.2/30         |
-   |                                          |
-  h3 (10.1.1.1/24)               h4 (10.1.2.1/24)
-  MAC 00:00:00:00:03:01          MAC 00:00:00:00:04:01
-```
+```text
+                 inter-switch link
+            sw1-eth1 <-> sw2-eth0
+                10.0.12.1/30  10.0.12.2/30
 
-### What is being tested
-
-| Path | CNA operator | P4 table |
-|------|--------------|----------|
-| h1 ↔ h2 | `layering` (eth1→ip1) | `fwd_ip1_tbl` |
-| h3 ↔ h4 | `subduction` (ip1→gre1→ip2) | `fwd_ip2_tbl` |
-| h1 → TCP port 80 on h2 | `session` (ip1.protocol=6 → tcp) | parser only |
-| h3 → UDP inside GRE | `session` (ip2.protocol=17 → udp) | parser only |
-
+   10.0.1.1/24                                  10.0.2.1/24
+h1 (MAC 00:00:00:00:01:01)                 h2 (MAC 00:00:00:00:02:01)
+    | port 0                                     | port 1
+    |                                             |
++---[ sw1 ]-------------------------------[ sw2 ]---+
+|    eth0                                   eth0    |
+|    eth1                                   eth1    |
+|    eth2                                   eth2    |
+|      |                                       |
+|      |                                       |
+h3 (10.1.1.1/24)                        h4 (10.1.2.1/24)
+MAC 00:00:00:00:03:01                   MAC 00:00:00:00:04:01
+   port 2                                   port 2
 ---
 
 ## Prerequisites
@@ -49,7 +45,7 @@ pip3 install scapy
 
 ```
 mininet_setup/
-├── run.sh            # Master pipeline script (CNA→P4→BMV2→Mininet)
+├── run.sh            # Master pipeline script (CNA->P4->BMV2->Mininet)
 ├── topo.py           # Mininet topology + BMV2 node wrapper + automated tests
 ├── table_setup.py    # Standalone table-entry pusher (useful with --topo-only)
 └── test_traffic.py   # Scapy packet-level tests (run inside Mininet hosts)
@@ -105,8 +101,8 @@ simple_switch_CLI --thrift-port 9090
 ## Running Scapy tests from inside Mininet
 
 ```
-mininet> h1 python3 test_traffic.py --iface h1-eth0 --test all
-mininet> h1 python3 test_traffic.py --iface h1-eth0 --test gre_icmp
+mininet> h1 python3 test_traffic.py --iface h1-eth0 --test tcp_session
+mininet> h3 python3 test_traffic.py --iface h3-eth0 --test gre_icmp
 ```
 
 Individual tests:
