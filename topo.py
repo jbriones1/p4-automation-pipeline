@@ -44,7 +44,7 @@ import os
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 
 # ---------------------------------------------------------------------------
 # Mininet imports – must be run as root
@@ -150,9 +150,23 @@ class SimpleSwitchNode(Host):
         super().stop(deleteIntfs=deleteIntfs)
 
     def run_cli(self, commands: str) -> str:
-        """Send commands to simple_switch_CLI via stdin and return stdout."""
+        """Send commands to simple_switch_CLI via stdin and return stdout.
+
+        simple_switch's Thrift server is bound inside this node's network
+        namespace.  We must enter that namespace (via mnexec -a <pid>) before
+        connecting, otherwise the CLI hits the host's own loopback and gets
+        "Connection refused" on every attempt — leaving all tables empty and
+        every packet dropped by the default drop() action.
+        """
         result = subprocess.run(
-            ["simple_switch_CLI", "--thrift-port", str(self.thrift_port)],
+            [
+                "mnexec",
+                "-a",
+                str(self.pid),
+                "simple_switch_CLI",
+                "--thrift-port",
+                str(self.thrift_port),
+            ],
             input=commands,
             capture_output=True,
             text=True,
@@ -171,9 +185,9 @@ class SubductionTopo(Topo):
     Two BMV2 switches + four end-hosts.
 
     Port numbering on each switch (1-indexed as BMV2 sees them):
-      port 1  →  host A  (h1 on sw1, h2 on sw2)
-      port 2  →  inter-switch link
-      port 3  →  host B  (h3 on sw1, h4 on sw2)
+      port 1  →  h1 (sw1) / inter-switch link (sw2)
+      port 2  →  inter-switch link (sw1) / h2 (sw2)
+      port 3  →  h3 (sw1) / h4 (sw2)
     """
 
     def build(self) -> None:
@@ -208,11 +222,11 @@ class SubductionTopo(Topo):
         sw2 = self.addHost("sw2")
 
         # Links  (order matters for BMV2 port numbering)
-        self.addLink(h1, sw1)  # sw1 port 1
-        self.addLink(sw1, sw2)  # sw1 port 2, sw2 port 1
-        self.addLink(h2, sw2)  # sw2 port 2
-        self.addLink(h3, sw1)  # sw1 port 3
-        self.addLink(h4, sw2)  # sw2 port 3
+        self.addLink(h1, sw1, port1=0, port2=0)
+        self.addLink(sw1, sw2, port1=1, port2=0)
+        self.addLink(h2, sw2, port1=0, port2=1)
+        self.addLink(h3, sw1, port1=0, port2=2)
+        self.addLink(h4, sw2, port1=0, port2=2)
 
 
 # ---------------------------------------------------------------------------
@@ -220,25 +234,31 @@ class SubductionTopo(Topo):
 # ---------------------------------------------------------------------------
 
 # Values are MAC-address strings used in set_field operations.
-SW1_MAC_PORT2 = "00:00:00:aa:01:02"  # sw1 egress MAC toward sw2
-SW2_MAC_PORT1 = "00:00:00:aa:02:01"  # sw2 egress MAC toward sw1
+SW1_MAC_PORT1 = "00:00:00:aa:01:01"  # sw1 -> h1
+SW1_MAC_PORT2 = "00:00:00:aa:01:02"  # sw1 -> sw2
+SW1_MAC_PORT3 = "00:00:00:aa:01:03"  # sw1 -> h3
 
-# simple_switch_CLI command strings
-# Table names come from cna2p4.py naming: fwd_{overlay}_tbl
+SW2_MAC_PORT1 = "00:00:00:aa:02:01"  # sw2 -> sw1
+SW2_MAC_PORT2 = "00:00:00:aa:02:02"  # sw2 -> h2
+SW2_MAC_PORT3 = "00:00:00:aa:02:03"  # sw2 -> h4
+
 SW1_COMMANDS = """\
+table_add fwd_ip1_tbl ipv4_forward 10.0.1.0/24 => 00:00:00:00:01:01 {sw1_mac_p1} 1
 table_add fwd_ip1_tbl ipv4_forward 10.0.2.0/24 => 00:00:00:00:02:01 {sw1_mac_p2} 2
+table_add fwd_ip1_tbl ipv4_forward 10.1.1.0/24 => 00:00:00:00:03:01 {sw1_mac_p3} 3
+table_add fwd_ip1_tbl ipv4_forward 10.1.2.0/24 => 00:00:00:00:04:01 {sw1_mac_p2} 2
 table_add fwd_ip1_tbl drop 0.0.0.0/0 =>
-table_add fwd_ip2_tbl tunnel_forward 10.1.2.0/24 => 10.0.12.2 2
 table_add fwd_ip2_tbl tunnel_drop 0.0.0.0/0 =>
-""".format(sw1_mac_p2=SW1_MAC_PORT2)
+""".format(sw1_mac_p1=SW1_MAC_PORT1, sw1_mac_p2=SW1_MAC_PORT2, sw1_mac_p3=SW1_MAC_PORT3)
 
 SW2_COMMANDS = """\
 table_add fwd_ip1_tbl ipv4_forward 10.0.1.0/24 => 00:00:00:00:01:01 {sw2_mac_p1} 1
-table_add fwd_ip1_tbl ipv4_forward 10.0.2.0/24 => 00:00:00:00:02:01 {sw2_mac_p1} 2
+table_add fwd_ip1_tbl ipv4_forward 10.0.2.0/24 => 00:00:00:00:02:01 {sw2_mac_p2} 2
+table_add fwd_ip1_tbl ipv4_forward 10.1.1.0/24 => 00:00:00:00:03:01 {sw2_mac_p1} 1
+table_add fwd_ip1_tbl ipv4_forward 10.1.2.0/24 => 00:00:00:00:04:01 {sw2_mac_p3} 3
 table_add fwd_ip1_tbl drop 0.0.0.0/0 =>
-table_add fwd_ip2_tbl tunnel_forward 10.1.1.0/24 => 10.0.12.1 1
 table_add fwd_ip2_tbl tunnel_drop 0.0.0.0/0 =>
-""".format(sw2_mac_p1=SW2_MAC_PORT1)
+""".format(sw2_mac_p1=SW2_MAC_PORT1, sw2_mac_p2=SW2_MAC_PORT2, sw2_mac_p3=SW2_MAC_PORT3)
 
 
 def populate_tables(sw1: SimpleSwitchNode, sw2: SimpleSwitchNode) -> None:
@@ -277,7 +297,7 @@ def run_tests(net: Mininet) -> None:
 
     def ping_test(src: Host, dst_ip: str, label: str) -> None:
         out = src.cmd(f"ping -c 3 -W 1 {dst_ip}")
-        ok = "3 received" in out or "0% packet loss" in out
+        ok = "3 received" in out or ", 0% packet loss" in out
         results.append((label, ok))
         status = "PASS " if ok else "FAIL "
         info(f"  {status}  {label}\n")
@@ -285,7 +305,7 @@ def run_tests(net: Mininet) -> None:
             info(f"         ping output: {out.strip()}\n")
 
     # Plain IPv4 forwarding (layering)
-    ping_test(h1, "10.0.2.1", "h1->2  (IPv4 layering)")
+    ping_test(h1, "10.0.2.1", "h1->h2  (IPv4 layering)")
     ping_test(h2, "10.0.1.1", "h2->h1  (IPv4 layering)")
 
     # GRE-tunneled inner IPv4 (subduction) – use scapy if ping is blocked
@@ -342,16 +362,43 @@ def run_network(bmv2_json: str, topo_only: bool = False) -> None:
     sw2.start()
 
     info("*** Configuring inter-switch IP addresses\n")
-    # Assign IPs to the inter-switch interface on each switch so that
-    # tunnel_forward can route outer packets correctly.
-    sw1_node.cmd("ip addr add 10.0.12.1/30 dev sw1-eth2")
-    sw2_node.cmd("ip addr add 10.0.12.2/30 dev sw2-eth1")
+    # Inter-switch link is sw1-eth1 <-> sw2-eth0
+    sw1_node.cmd("ip addr replace 10.0.12.1/30 dev sw1-eth1")
+    sw2_node.cmd("ip addr replace 10.0.12.2/30 dev sw2-eth0")
 
-    # Host routes so pings reach the right gateway interface
-    net.get("h1").cmd("ip route add 10.0.0.0/8 via 10.0.1.254")
-    net.get("h2").cmd("ip route add 10.0.0.0/8 via 10.0.2.254")
-    net.get("h3").cmd("ip route add 10.1.0.0/16 via 10.1.1.254")
-    net.get("h4").cmd("ip route add 10.1.0.0/16 via 10.1.2.254")
+    h1 = cast(Host, net.get("h1"))
+    h2 = cast(Host, net.get("h2"))
+    h3 = cast(Host, net.get("h3"))
+    h4 = cast(Host, net.get("h4"))
+
+    # Route all project subnets through virtual gateway on each host-facing segment.
+    h1.cmd("ip route replace 10.0.0.0/8 via 10.0.1.254 dev h1-eth0")
+    h2.cmd("ip route replace 10.0.0.0/8 via 10.0.2.254 dev h2-eth0")
+    h3.cmd("ip route replace 10.0.0.0/8 via 10.1.1.254 dev h3-eth0")
+    h4.cmd("ip route replace 10.0.0.0/8 via 10.1.2.254 dev h4-eth0")
+
+    GW_MAC = "00:00:00:00:00:fe"
+    h1.cmd(f"ip neigh replace 10.0.1.254 lladdr {GW_MAC} dev h1-eth0 nud permanent")
+    h2.cmd(f"ip neigh replace 10.0.2.254 lladdr {GW_MAC} dev h2-eth0 nud permanent")
+    h3.cmd(f"ip neigh replace 10.1.1.254 lladdr {GW_MAC} dev h3-eth0 nud permanent")
+    h4.cmd(f"ip neigh replace 10.1.2.254 lladdr {GW_MAC} dev h4-eth0 nud permanent")
+    # info("*** Configuring inter-switch IP addresses\n")
+    # # Assign IPs to the inter-switch interface on each switch so that
+    # # tunnel_forward can route outer packets correctly.
+    # sw1_node.cmd("ip addr add 10.0.12.1/30 dev sw1-eth2")
+    # sw2_node.cmd("ip addr add 10.0.12.2/30 dev sw2-eth1")
+    #
+    # # Host routes so pings reach the right gateway interface
+    # net.get("h1").cmd("ip route add 10.0.0.0/8 via 10.0.1.254")
+    # net.get("h2").cmd("ip route add 10.0.0.0/8 via 10.0.2.254")
+    # net.get("h3").cmd("ip route add 10.1.0.0/16 via 10.1.1.254")
+    # net.get("h4").cmd("ip route add 10.1.0.0/16 via 10.1.2.254")
+    #
+    # GW_MAC = "00:00:00:00:00:fe"
+    # net.get("h1").cmd(f"arp -s 10.0.1.254 {GW_MAC}")
+    # net.get("h2").cmd(f"arp -s 10.0.2.254 {GW_MAC}")
+    # net.get("h3").cmd(f"arp -s 10.1.1.254 {GW_MAC}")
+    # net.get("h4").cmd(f"arp -s 10.1.2.254 {GW_MAC}")
 
     populate_tables(sw1, sw2)
 

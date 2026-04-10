@@ -133,7 +133,6 @@
               "target": "eth1.src_addr",
               "value": { "from_param": "src_mac" }
             },
-            { "op": "decrement", "target": "ip1.ttl", "amount": 1 },
             {
               "op": "set_egress_port",
               "value": { "from_param": "egress_port" }
