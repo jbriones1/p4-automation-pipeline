@@ -150,9 +150,23 @@ class SimpleSwitchNode(Host):
         super().stop(deleteIntfs=deleteIntfs)
 
     def run_cli(self, commands: str) -> str:
-        """Send commands to simple_switch_CLI via stdin and return stdout."""
+        """Send commands to simple_switch_CLI via stdin and return stdout.
+
+        simple_switch's Thrift server is bound inside this node's network
+        namespace.  We must enter that namespace (via mnexec -a <pid>) before
+        connecting, otherwise the CLI hits the host's own loopback and gets
+        "Connection refused" on every attempt — leaving all tables empty and
+        every packet dropped by the default drop() action.
+        """
         result = subprocess.run(
-            ["simple_switch_CLI", "--thrift-port", str(self.thrift_port)],
+            [
+                "mnexec",
+                "-a",
+                str(self.pid),
+                "simple_switch_CLI",
+                "--thrift-port",
+                str(self.thrift_port),
+            ],
             input=commands,
             capture_output=True,
             text=True,
@@ -220,17 +234,19 @@ class SubductionTopo(Topo):
 # ---------------------------------------------------------------------------
 
 # Values are MAC-address strings used in set_field operations.
+SW1_MAC_PORT1 = "00:00:00:aa:01:01"  # sw1 egress MAC toward h1
 SW1_MAC_PORT2 = "00:00:00:aa:01:02"  # sw1 egress MAC toward sw2
 SW2_MAC_PORT1 = "00:00:00:aa:02:01"  # sw2 egress MAC toward sw1
 
 # simple_switch_CLI command strings
 # Table names come from cna2p4.py naming: fwd_{overlay}_tbl
 SW1_COMMANDS = """\
+table_add fwd_ip1_tbl ipv4_forward 10.0.1.0/24 => 00:00:00:00:01:01 {sw1_mac_p1} 1
 table_add fwd_ip1_tbl ipv4_forward 10.0.2.0/24 => 00:00:00:00:02:01 {sw1_mac_p2} 2
 table_add fwd_ip1_tbl drop 0.0.0.0/0 =>
 table_add fwd_ip2_tbl tunnel_forward 10.1.2.0/24 => 10.0.12.2 2
 table_add fwd_ip2_tbl tunnel_drop 0.0.0.0/0 =>
-""".format(sw1_mac_p2=SW1_MAC_PORT2)
+""".format(sw1_mac_p1=SW1_MAC_PORT1, sw1_mac_p2=SW1_MAC_PORT2)
 
 SW2_COMMANDS = """\
 table_add fwd_ip1_tbl ipv4_forward 10.0.1.0/24 => 00:00:00:00:01:01 {sw2_mac_p1} 1
@@ -277,7 +293,7 @@ def run_tests(net: Mininet) -> None:
 
     def ping_test(src: Host, dst_ip: str, label: str) -> None:
         out = src.cmd(f"ping -c 3 -W 1 {dst_ip}")
-        ok = "3 received" in out or "0% packet loss" in out
+        ok = "3 received" in out or ", 0% packet loss" in out
         results.append((label, ok))
         status = "PASS " if ok else "FAIL "
         info(f"  {status}  {label}\n")
@@ -285,7 +301,7 @@ def run_tests(net: Mininet) -> None:
             info(f"         ping output: {out.strip()}\n")
 
     # Plain IPv4 forwarding (layering)
-    ping_test(h1, "10.0.2.1", "h1->2  (IPv4 layering)")
+    ping_test(h1, "10.0.2.1", "h1->h2  (IPv4 layering)")
     ping_test(h2, "10.0.1.1", "h2->h1  (IPv4 layering)")
 
     # GRE-tunneled inner IPv4 (subduction) – use scapy if ping is blocked
@@ -352,6 +368,12 @@ def run_network(bmv2_json: str, topo_only: bool = False) -> None:
     net.get("h2").cmd("ip route add 10.0.0.0/8 via 10.0.2.254")
     net.get("h3").cmd("ip route add 10.1.0.0/16 via 10.1.1.254")
     net.get("h4").cmd("ip route add 10.1.0.0/16 via 10.1.2.254")
+
+    GW_MAC = "00:00:00:00:00:fe"
+    net.get("h1").cmd(f"arp -s 10.0.1.254 {GW_MAC}")
+    net.get("h2").cmd(f"arp -s 10.0.2.254 {GW_MAC}")
+    net.get("h3").cmd(f"arp -s 10.1.1.254 {GW_MAC}")
+    net.get("h4").cmd(f"arp -s 10.1.2.254 {GW_MAC}")
 
     populate_tables(sw1, sw2)
 
